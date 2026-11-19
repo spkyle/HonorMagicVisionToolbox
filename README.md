@@ -65,3 +65,24 @@
 ## 日志位置
 - `%TEMP%\MagicTaskbar\adaptive-topbar.log`
 - `%TEMP%\MagicTaskbar\control-center-boost.log`
+- `%TEMP%\MagicTaskbar\message-center-bridge.log`
+
+---
+
+## 安全说明与免责声明
+
+1. **零官方二进制修改**  
+   本项目源码全部公开，不修改、不替换、不破坏荣耀 Magic 视界、荣耀电脑管家及 Windows 系统的任何官方可执行文件（`.exe`）、动态库（`.dll`）及其数字签名。所有功能仅在运行期通过 .NET 官方扩展机制挂载：
+   - 顶部栏与 Dock：`magictaskbar-ui.runtimeconfig.json` 配置 `STARTUP_HOOKS` 加载 `TopBarAdaptiveColor.dll`；
+   - 控制中心与通知中心：通过 `ControlCenterTrayUI.exe.config` / `MessageCenterUI.exe.config` 配置 `.NET AppDomainManager` 加载 `ControlCenterSpeedBoost.dll` / `MessageCenterBridge.dll`。
+
+2. **无后台服务与数据收集**  
+   不安装系统服务、驱动程序或开机计划任务，不修改系统内核及系统保护文件，不连接第三方服务器，亦不收集、记录或上传任何用户聊天内容与个人数据。用户配置、图标缓存与运行日志均仅保存在本地当前用户目录（`%APPDATA%\taskbarAndAIbar\` 与 `%TEMP%\MagicTaskbar\`）。
+
+3. **配置可备份与完整还原**  
+   安装脚本在写入配置前会自动将原始 `.runtimeconfig.json` 与 `.exe.config` 备份为 `.bak` 文件；随时可在设置页「Magic 视界工具箱」底部点击 **「卸载并还原」**，或运行 **`一键卸载.bat`** / `restore_topbar.ps1`，自动恢复官方原始配置、触控板默认设置并清理全部补丁与临时文件。
+
+4. **免责条款**  
+   - 本项目仅作个人研究与桌面交互体验增强，与荣耀终端有限公司（HONOR）无任何官方关联或授权关系。  
+   - 请通过本仓库官方页面获取源码或发行包，并在理解上述机制后自行决定是否使用。因官方软件版本更新、系统环境差异、第三方软件冲突或个人误操作造成的异常或损失，作者不承担相关责任；如官方更新后出现兼容问题，请先执行卸载还原。  
+   - 下载、运行或二次分发本项目即视为您已知悉并同意本声明。
