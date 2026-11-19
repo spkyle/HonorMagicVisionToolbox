@@ -179,6 +179,10 @@ if (Test-Path $ccExe) {
 
     if ($boostCopied) {
         Unblock-File -Path $dstBoostDll, $dstBoostCfg -ErrorAction SilentlyContinue
+        # Refresh timestamp after Copy-Item (which preserves source LastWriteTime) before watchdog stale check.
+        Start-Sleep -Milliseconds 150
+        $cfgWriteUtc = [DateTime]::UtcNow
+        (Get-Item $dstBoostCfg).LastWriteTimeUtc = $cfgWriteUtc
         Write-Host "已部署控制中心响应加速模块: $dstBoostDll" -ForegroundColor Green
     }
 
@@ -186,7 +190,7 @@ if (Test-Path $ccExe) {
         throw "未检测到控制中心响应加速模块或配置文件: $dstBoostCfg"
     }
 
-    # Guard against Honor watchdog relaunching ControlCenterTrayUI.exe before .exe.config landed.
+    # Guard against Honor MBAProcessWatcher relaunching ControlCenterTrayUI.exe before .exe.config landed.
     $cfgWriteUtc = (Get-Item $dstBoostCfg).LastWriteTimeUtc
     $staleCcProcs = @(Get-Process -Name "ControlCenterTrayUI" -ErrorAction SilentlyContinue | Where-Object {
         try { $_.StartTime.ToUniversalTime() -lt $cfgWriteUtc } catch { $true }
