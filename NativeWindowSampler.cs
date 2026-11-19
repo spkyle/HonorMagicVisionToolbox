@@ -322,6 +322,79 @@ namespace TopBarAdaptiveColor
             };
         }
 
+        internal static bool HasRealFullscreenWindow(IntPtr topBarHwnd)
+        {
+            if (topBarHwnd == IntPtr.Zero)
+            {
+                return false;
+            }
+
+            IntPtr monitor = MonitorFromWindow(topBarHwnd, MonitorDefaultToNearest);
+            if (monitor == IntPtr.Zero)
+            {
+                return false;
+            }
+
+            var mi = new MONITORINFO { cbSize = Marshal.SizeOf<MONITORINFO>() };
+            if (!GetMonitorInfo(monitor, ref mi))
+            {
+                return false;
+            }
+
+            RECT mon = mi.rcMonitor;
+            bool found = false;
+
+            EnumWindows((hwnd, _) =>
+            {
+                if (hwnd == topBarHwnd || !IsWindowVisible(hwnd) || IsIconic(hwnd) || IsWindowCloaked(hwnd))
+                {
+                    return true;
+                }
+
+                GetWindowThreadProcessId(hwnd, out uint pid);
+                if (pid == 0 || pid == (uint)CurrentPid)
+                {
+                    return true;
+                }
+
+                long exStyle = GetWindowLongPtr(hwnd, GwlExStyle).ToInt64();
+                bool isToolOnly = (exStyle & WsExToolWindow) != 0 && (exStyle & WsExAppWindow) == 0;
+                bool isClickThroughLayered = (exStyle & (WsExTransparent | WsExLayered)) == (WsExTransparent | WsExLayered);
+                if (isToolOnly || isClickThroughLayered)
+                {
+                    return true;
+                }
+
+                string className = GetWindowClassNameSafe(hwnd);
+                if (IgnoredClasses.Contains(className))
+                {
+                    return true;
+                }
+
+                string procName = GetProcessNameCached(pid);
+                if (!string.IsNullOrEmpty(procName) &&
+                    (IgnoredProcessNames.Contains(procName) ||
+                     (string.Equals(procName, "pixpin", StringComparison.OrdinalIgnoreCase) && (exStyle & WsExLayered) != 0)))
+                {
+                    return true;
+                }
+
+                RECT frame = GetExtendedFrameRect(hwnd);
+                if (frame.Left <= mon.Left + 2 &&
+                    frame.Right >= mon.Right - 2 &&
+                    frame.Top <= mon.Top + 2 &&
+                    frame.Bottom >= mon.Bottom - 2)
+                {
+                    found = true;
+                    return false;
+                }
+
+                return true;
+            }, IntPtr.Zero);
+
+            return found;
+        }
+
         private static Color? SampleStripDominantColor(
             int xStart,
             int xEnd,

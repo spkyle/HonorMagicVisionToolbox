@@ -78,6 +78,7 @@ namespace TopBarAdaptiveColor
         private readonly MethodInfo? _hideSmartBackdropMethod;
         private readonly MethodInfo? _restoreWpfVisualMethod;
         private readonly MethodInfo? _getTopBarHeightPixelsMethod;
+        private readonly MethodInfo? _applyFixedFullscreenMethod;
         private FrameworkElement? _rootContent;
 
         private sealed record ShapeBrushPair(Brush? Fill, Brush? Stroke);
@@ -113,6 +114,7 @@ namespace TopBarAdaptiveColor
         private bool _useDarkForeground;
         private Color? _currentTargetColor;
         private IntPtr _lastMatchedHwnd;
+        private long _lastFullscreenRecoverTick;
         private int _burstRemaining;
         private double _baseWindowHeightDip = DefaultTopBarHeightDip;
         private double _origWindowHeight = double.NaN;
@@ -159,6 +161,7 @@ namespace TopBarAdaptiveColor
             _syncSmartBackdropMethod = t.GetMethod("SyncSmartCompositionBackdrop", flags);
             _restoreWpfVisualMethod = t.GetMethod("RestoreWpfTopBarVisual", flags);
             _getTopBarHeightPixelsMethod = t.GetMethod("GetTopBarHeightPixels", flags);
+            _applyFixedFullscreenMethod = t.GetMethod("ApplyFixedFullscreenVisibility", flags);
 
             if (_desktopLayerHostField != null)
             {
@@ -468,8 +471,23 @@ namespace TopBarAdaptiveColor
             }
             else if (eventType == EventObjectDestroy || eventType == EventObjectHide)
             {
-                if (idObject != 0 || idChild != 0 || hwnd == IntPtr.Zero || hwnd != _lastMatchedHwnd)
+                if (idObject != 0 || idChild != 0 || hwnd == IntPtr.Zero)
                 {
+                    return;
+                }
+
+                if (hwnd == _hwnd)
+                {
+                    ScheduleCoalescedEvaluate(startBurst: true);
+                    return;
+                }
+
+                if (hwnd != _lastMatchedHwnd)
+                {
+                    if (GetBoolField(_fixedFullscreenHiddenField))
+                    {
+                        ScheduleCoalescedEvaluate();
+                    }
                     return;
                 }
                 _minimizingExclusions[hwnd] = Environment.TickCount64 + 350;
@@ -482,6 +500,11 @@ namespace TopBarAdaptiveColor
                 if (idObject != 0 || idChild != 0 || hwnd == IntPtr.Zero)
                 {
                     return;
+                }
+
+                if (GetBoolField(_fixedFullscreenHiddenField))
+                {
+                    ScheduleCoalescedEvaluate();
                 }
             }
             else if (eventType == EventObjectLocationChange)
@@ -569,12 +592,51 @@ namespace TopBarAdaptiveColor
             return GetBoolField(_toolbarModePopupOpenField);
         }
 
+        private void RecoverFalseFixedFullscreenHideIfNeeded()
+        {
+            if (_disposed ||
+                _applyFixedFullscreenMethod == null ||
+                GetIntField(_toolbarModeField, 0) != 0 ||
+                !GetBoolField(_fixedFullscreenHiddenField) ||
+                GetBoolField(_displayTransitionHiddenField) ||
+                GetBoolField(_closingTopologyField) ||
+                GetIntField(_barModePhaseField, 0) != 0)
+            {
+                return;
+            }
+
+            IntPtr hwnd = EnsureHwnd();
+            if (hwnd == IntPtr.Zero || NativeWindowSampler.HasRealFullscreenWindow(hwnd))
+            {
+                return;
+            }
+
+            long now = Environment.TickCount64;
+            if (now - _lastFullscreenRecoverTick < 150)
+            {
+                return;
+            }
+
+            _lastFullscreenRecoverTick = now;
+            try
+            {
+                _applyFixedFullscreenMethod.Invoke(_window, new object[] { false });
+                DiagnosticLog.Info("Recovered TopBar visibility from screen-recorder / non-fullscreen overlay.");
+            }
+            catch (Exception ex)
+            {
+                DiagnosticLog.Warn($"ApplyFixedFullscreenVisibility(false) failed: {ex.Message}");
+            }
+        }
+
         private void EvaluateAndApply()
         {
             if (_disposed)
             {
                 return;
             }
+
+            RecoverFalseFixedFullscreenHideIfNeeded();
 
             if (!IsEligibleForAdaptiveColor())
             {

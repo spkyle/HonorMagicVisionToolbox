@@ -28,6 +28,10 @@ namespace TopBarAdaptiveColor
             RegexOptions.IgnoreCase | RegexOptions.Compiled);
 
         private static readonly ConcurrentDictionary<string, Uri?> CachedDarkUris = new(StringComparer.OrdinalIgnoreCase);
+        private static readonly object CustomTintSync = new();
+        private static readonly ConditionalWeakTable<DependencyObject, string> CustomAlertHex = new();
+        private static readonly List<WeakReference<SvgIconThemer>> ActiveInstances = new();
+        private static SvgIconThemer? _fallbackAlertThemer;
 
         private readonly Type? _svgViewboxType;
         private readonly DependencyProperty? _sourceProperty;
@@ -48,6 +52,60 @@ namespace TopBarAdaptiveColor
                 if (_sourceProperty != null)
                 {
                     _sourceDescriptor = DependencyPropertyDescriptor.FromProperty(_sourceProperty, _svgViewboxType);
+                }
+            }
+
+            lock (CustomTintSync)
+            {
+                ActiveInstances.Add(new WeakReference<SvgIconThemer>(this));
+            }
+        }
+
+        internal static void SetElementAlertHex(DependencyObject? svgElement, string? hex)
+        {
+            if (svgElement == null)
+            {
+                return;
+            }
+
+            List<SvgIconThemer> live = new();
+            lock (CustomTintSync)
+            {
+                CustomAlertHex.Remove(svgElement);
+                if (!string.IsNullOrEmpty(hex))
+                {
+                    CustomAlertHex.Add(svgElement, hex);
+                }
+
+                for (int i = ActiveInstances.Count - 1; i >= 0; i--)
+                {
+                    if (ActiveInstances[i].TryGetTarget(out var inst))
+                    {
+                        live.Add(inst);
+                    }
+                    else
+                    {
+                        ActiveInstances.RemoveAt(i);
+                    }
+                }
+            }
+
+            bool applied = false;
+            foreach (var inst in live)
+            {
+                if (inst.IsSvgViewbox(svgElement))
+                {
+                    inst.ApplyToSvg(svgElement, inst._isDarkMode);
+                    applied = true;
+                }
+            }
+
+            if (!applied)
+            {
+                _fallbackAlertThemer ??= new SvgIconThemer();
+                if (_fallbackAlertThemer.IsSvgViewbox(svgElement))
+                {
+                    _fallbackAlertThemer.ApplyToSvg(svgElement, false);
                 }
             }
         }
@@ -83,7 +141,13 @@ namespace TopBarAdaptiveColor
                 _originalUris.Add(svgElement, currentUri);
             }
 
-            if (!useDarkForeground)
+            string? customHex = null;
+            lock (CustomTintSync)
+            {
+                CustomAlertHex.TryGetValue(svgElement, out customHex);
+            }
+
+            if (!useDarkForeground && string.IsNullOrEmpty(customHex))
             {
                 if (IsOurGeneratedUri(currentUri) && _originalUris.TryGetValue(svgElement, out var origUri))
                 {
@@ -98,10 +162,11 @@ namespace TopBarAdaptiveColor
                 _originalUris.Add(svgElement, baseUri);
             }
 
-            Uri? darkUri = GetOrCreateThemedUri(baseUri, DarkInkHex);
-            if (darkUri != null && !Equals(currentUri, darkUri))
+            string targetHex = !string.IsNullOrEmpty(customHex) ? customHex! : DarkInkHex;
+            Uri? themedUri = GetOrCreateThemedUri(baseUri, targetHex);
+            if (themedUri != null && !Equals(currentUri, themedUri))
             {
-                SetSourceGuarded(svgElement, darkUri);
+                SetSourceGuarded(svgElement, themedUri);
             }
         }
 
@@ -141,12 +206,21 @@ namespace TopBarAdaptiveColor
                 _originalUris.Remove(svgElement);
                 _originalUris.Add(svgElement, currentUri);
 
-                if (_isDarkMode)
+                string? customHex = null;
+                lock (CustomTintSync)
                 {
-                    Uri? darkUri = GetOrCreateThemedUri(currentUri, DarkInkHex);
-                    if (darkUri != null && !Equals(currentUri, darkUri))
+                    CustomAlertHex.TryGetValue(svgElement, out customHex);
+                }
+
+                string? targetHex = !string.IsNullOrEmpty(customHex)
+                    ? customHex
+                    : (_isDarkMode ? DarkInkHex : null);
+                if (!string.IsNullOrEmpty(targetHex))
+                {
+                    Uri? themedUri = GetOrCreateThemedUri(currentUri, targetHex!);
+                    if (themedUri != null && !Equals(currentUri, themedUri))
                     {
-                        SetSourceGuarded(svgElement, darkUri);
+                        SetSourceGuarded(svgElement, themedUri);
                     }
                 }
             }

@@ -27,6 +27,7 @@ namespace TopBarAdaptiveColor
     {
         public const string AdaptiveTopBarColor = "adaptive_topbar_color";
         public const string ShowYoyoClawButton = "show_yoyo_claw_button";
+        public const string NotificationAlertAnimation = "notification_alert_animation";
         public const string NativeTrayRightClick = "native_tray_right_click";
         public const string HiddenTrayIconPinning = "hidden_tray_icon_pinning";
         public const string TopBarMaximizedWindowDrag = "topbar_maximized_window_drag";
@@ -121,6 +122,17 @@ namespace TopBarAdaptiveColor
                 TitleEn = "Show / hide YOYO Claw button on top bar",
                 DescriptionZh = "控制状态栏右侧控制中心旁默认无法关闭的 YOYO Claw 按钮显示，关闭后立即隐藏",
                 DescriptionEn = "Show or hide the YOYO Claw button beside Control Center on the top bar",
+                DefaultEnabled = true
+            },
+            new()
+            {
+                Id = ToolboxModuleIds.NotificationAlertAnimation,
+                Category = ToolboxCategory.StatusBarEnhancements,
+                ControlKind = ToolboxControlKind.Toggle,
+                TitleZh = "有通知时右上角按钮变色与约 2 秒轻震动提醒",
+                TitleEn = "Highlight & gently shake Notification button (~2s) when unread alerts exist",
+                DescriptionZh = "有系统通知或微信等顶栏应用图标闪烁未读时，自动为右上角通知按钮切换醒目配色并约每 2 秒轻抖一次；点开或已读后恢复常态",
+                DescriptionEn = "Use a distinct highlight color and gentle ~2s bell shake on NotificationButton while unread notifications or flashing tray alerts exist",
                 DefaultEnabled = true
             },
             new()

@@ -8,6 +8,8 @@ using System.Runtime.InteropServices;
 using System.Threading.Tasks;
 using System.Windows;
 using System.Windows.Controls;
+using System.Windows.Media;
+using System.Windows.Media.Animation;
 using System.Windows.Threading;
 
 namespace TopBarAdaptiveColor
@@ -40,7 +42,18 @@ namespace TopBarAdaptiveColor
         private readonly Button? _yoyoButton;
         private readonly Button? _controlCenterButton;
         private readonly Button? _notificationButton;
+        private readonly FrameworkElement? _notificationIcon;
+        private readonly ItemsControl? _statusItemsControl;
         private readonly DependencyPropertyDescriptor? _yoyoVisibilityDescriptor;
+        private readonly DependencyPropertyDescriptor? _notifSourceDescriptor;
+        private readonly DependencyPropertyDescriptor? _notifBgDescriptor;
+        private readonly DispatcherTimer? _notifAlertTimer;
+        private readonly HashSet<string> _ackedAppUnreadKeys = new(StringComparer.OrdinalIgnoreCase);
+        private RotateTransform? _notifShakeRotate;
+        private bool _notifAlertActive;
+        private bool _isUpdatingNotifVisual;
+        private long _lastNotifShakeTick;
+        private const string NotificationAlertHex = "#FF6A2B";
         private readonly ClickMode _origControlCenterClickMode = ClickMode.Release;
         private readonly ClickMode _origNotificationClickMode = ClickMode.Release;
         private readonly RoutedEventHandler? _origControlCenterClickHandler;
@@ -113,6 +126,8 @@ namespace TopBarAdaptiveColor
             _yoyoButton = t.GetField("YoyoClawButton", flags)?.GetValue(topBarWindow) as Button;
             _controlCenterButton = t.GetField("ControlCenterButton", flags)?.GetValue(topBarWindow) as Button;
             _notificationButton = t.GetField("NotificationButton", flags)?.GetValue(topBarWindow) as Button;
+            _notificationIcon = t.GetField("NotificationIcon", flags)?.GetValue(topBarWindow) as FrameworkElement;
+            _statusItemsControl = t.GetField("StatusNotificationItemsControl", flags)?.GetValue(topBarWindow) as ItemsControl;
 
             _hasNotificationField = t.GetField("_hasNotification", flags);
             _systemServiceField = t.GetField("_systemService", flags);
@@ -163,11 +178,37 @@ namespace TopBarAdaptiveColor
             }
 
             AdaptiveSettingsStore.YoyoClawChanged += OnYoyoClawSettingChanged;
+            AdaptiveSettingsStore.NotificationAlertAnimationChanged += OnNotificationAlertSettingChanged;
             AdaptiveSettingsStore.FastSettingsChanged += OnFastSettingsChanged;
             AdaptiveSettingsStore.FastNotificationChanged += OnFastSettingsChanged;
 
+            if (_notificationButton != null)
+            {
+                _notifBgDescriptor = DependencyPropertyDescriptor.FromProperty(Control.BackgroundProperty, typeof(Button));
+                _notifBgDescriptor?.AddValueChanged(_notificationButton, OnNotificationButtonBackgroundChanged);
+
+                if (_notificationIcon != null)
+                {
+                    Type svgType = _notificationIcon.GetType();
+                    var srcField = svgType.GetField("SourceProperty", BindingFlags.Public | BindingFlags.Static | BindingFlags.FlattenHierarchy);
+                    if (srcField?.GetValue(null) is DependencyProperty srcDp)
+                    {
+                        _notifSourceDescriptor = DependencyPropertyDescriptor.FromProperty(srcDp, svgType);
+                        _notifSourceDescriptor?.AddValueChanged(_notificationIcon, OnNotificationIconSourceChanged);
+                    }
+                }
+
+                _notifAlertTimer = new DispatcherTimer(DispatcherPriority.Background, _window.Dispatcher)
+                {
+                    Interval = TimeSpan.FromMilliseconds(950)
+                };
+                _notifAlertTimer.Tick += OnNotificationAlertTimerTick;
+                _notifAlertTimer.Start();
+            }
+
             ApplyYoyoVisibility();
             ApplyControlCenterClickMode();
+            RefreshNotificationAlertVisual(allowImmediateShake: false);
             _trayRelay = new StatusNotificationTrayRelay(topBarWindow);
 
             DiagnosticLog.Info(
@@ -498,7 +539,9 @@ namespace TopBarAdaptiveColor
             }
             _lastNotificationFastOpenTick = nowTick;
 
+            AcknowledgeCurrentUnreadApps();
             PrepareFastPopupOpen(PopupSurfaceNotification, _notificationTrackerField, clearNotificationBadge: true);
+            RefreshNotificationAlertVisual(allowImmediateShake: false);
 
             bool wasVisibleBefore = HasVisibleMessageCenterWindow();
             if (wasVisibleBefore)
@@ -738,9 +781,23 @@ namespace TopBarAdaptiveColor
 
             _disposed = true;
             _trayRelay.Dispose();
+            _notifAlertTimer?.Stop();
             AdaptiveSettingsStore.YoyoClawChanged -= OnYoyoClawSettingChanged;
+            AdaptiveSettingsStore.NotificationAlertAnimationChanged -= OnNotificationAlertSettingChanged;
             AdaptiveSettingsStore.FastSettingsChanged -= OnFastSettingsChanged;
             AdaptiveSettingsStore.FastNotificationChanged -= OnFastSettingsChanged;
+
+            if (_notificationButton != null && _notifBgDescriptor != null)
+            {
+                _notifBgDescriptor.RemoveValueChanged(_notificationButton, OnNotificationButtonBackgroundChanged);
+            }
+
+            if (_notificationIcon != null && _notifSourceDescriptor != null)
+            {
+                _notifSourceDescriptor.RemoveValueChanged(_notificationIcon, OnNotificationIconSourceChanged);
+            }
+
+            ClearNotificationAlertVisual();
 
             if (_yoyoButton != null && _yoyoVisibilityDescriptor != null)
             {
@@ -801,6 +858,249 @@ namespace TopBarAdaptiveColor
             lock (LifecycleSync)
             {
                 return ActiveInstances.Count == 0;
+            }
+        }
+
+        private void OnNotificationAlertSettingChanged(bool _)
+        {
+            if (_disposed || _window.Dispatcher.HasShutdownStarted)
+            {
+                return;
+            }
+
+            _window.Dispatcher.BeginInvoke(DispatcherPriority.Normal, new Action(() =>
+            {
+                RefreshNotificationAlertVisual(allowImmediateShake: true);
+            }));
+        }
+
+        private void OnNotificationIconSourceChanged(object? sender, EventArgs e)
+        {
+            if (_disposed)
+            {
+                return;
+            }
+
+            RefreshNotificationAlertVisual(allowImmediateShake: true);
+        }
+
+        private void OnNotificationButtonBackgroundChanged(object? sender, EventArgs e)
+        {
+            if (_disposed || _isUpdatingNotifVisual || !_notifAlertActive || _notificationButton == null)
+            {
+                return;
+            }
+
+            ApplyNotificationButtonPillTint();
+        }
+
+        private void OnNotificationAlertTimerTick(object? sender, EventArgs e)
+        {
+            if (_disposed || !_window.IsVisible)
+            {
+                return;
+            }
+
+            RefreshNotificationAlertVisual(allowImmediateShake: false);
+            if (_notifAlertActive)
+            {
+                long now = Environment.TickCount64;
+                if (now - _lastNotifShakeTick >= 1950)
+                {
+                    TriggerNotificationShake(now);
+                }
+            }
+        }
+
+        internal bool RefreshNotificationAlertVisual(bool allowImmediateShake)
+        {
+            if (_disposed || _notificationButton == null)
+            {
+                return false;
+            }
+
+            bool sysUnread = _hasNotificationField?.GetValue(_window) is true;
+            bool appUnread = HasAnyUnackedAppUnread();
+            bool shouldAlert = AdaptiveSettingsStore.IsNotificationAlertAnimationEnabled && (sysUnread || appUnread);
+
+            if (!shouldAlert)
+            {
+                ClearNotificationAlertVisual();
+                return false;
+            }
+
+            bool wasActive = _notifAlertActive;
+            _notifAlertActive = true;
+            SvgIconThemer.SetElementAlertHex(_notificationIcon, NotificationAlertHex);
+            ApplyNotificationButtonPillTint();
+
+            if (!wasActive || allowImmediateShake)
+            {
+                long now = Environment.TickCount64;
+                if (!wasActive || now - _lastNotifShakeTick >= 1950)
+                {
+                    TriggerNotificationShake(now);
+                }
+            }
+
+            return true;
+        }
+
+        private void ApplyNotificationButtonPillTint()
+        {
+            if (_notificationButton == null)
+            {
+                return;
+            }
+
+            Brush desired = new SolidColorBrush(Color.FromArgb(0x3D, 0xFF, 0x6A, 0x2B));
+            desired.Freeze();
+            if (_notificationButton.Background is SolidColorBrush cur &&
+                cur.Color == Color.FromArgb(0x3D, 0xFF, 0x6A, 0x2B))
+            {
+                return;
+            }
+
+            _isUpdatingNotifVisual = true;
+            try
+            {
+                _notificationButton.Background = desired;
+            }
+            finally
+            {
+                _isUpdatingNotifVisual = false;
+            }
+        }
+
+        private void ClearNotificationAlertVisual()
+        {
+            bool wasActive = _notifAlertActive;
+            _notifAlertActive = false;
+
+            if (_notifShakeRotate != null)
+            {
+                _notifShakeRotate.BeginAnimation(RotateTransform.AngleProperty, null);
+                _notifShakeRotate.Angle = 0.0;
+            }
+
+            if (wasActive && _notificationIcon != null)
+            {
+                SvgIconThemer.SetElementAlertHex(_notificationIcon, null);
+            }
+
+            if (wasActive && _notificationButton != null)
+            {
+                _isUpdatingNotifVisual = true;
+                try
+                {
+                    _notificationButton.Background = Brushes.Transparent;
+                }
+                finally
+                {
+                    _isUpdatingNotifVisual = false;
+                }
+            }
+        }
+
+        private void TriggerNotificationShake(long nowTick)
+        {
+            _lastNotifShakeTick = nowTick;
+            UIElement? target = _notificationIcon ?? (UIElement?)_notificationButton;
+            if (target == null)
+            {
+                return;
+            }
+
+            if (_notifShakeRotate == null)
+            {
+                _notifShakeRotate = new RotateTransform(0.0);
+                target.RenderTransformOrigin = new Point(0.5, 0.25);
+                if (target.RenderTransform is TransformGroup existingGroup)
+                {
+                    existingGroup.Children.Add(_notifShakeRotate);
+                }
+                else if (target.RenderTransform != null && !target.RenderTransform.IsFrozen && target.RenderTransform != Transform.Identity)
+                {
+                    var tg = new TransformGroup();
+                    tg.Children.Add(target.RenderTransform);
+                    tg.Children.Add(_notifShakeRotate);
+                    target.RenderTransform = tg;
+                }
+                else
+                {
+                    target.RenderTransform = _notifShakeRotate;
+                }
+            }
+
+            var anim = new DoubleAnimationUsingKeyFrames
+            {
+                Duration = TimeSpan.FromMilliseconds(420),
+                FillBehavior = FillBehavior.Stop
+            };
+            anim.KeyFrames.Add(new LinearDoubleKeyFrame(0.0, KeyTime.FromTimeSpan(TimeSpan.Zero)));
+            anim.KeyFrames.Add(new LinearDoubleKeyFrame(-14.0, KeyTime.FromTimeSpan(TimeSpan.FromMilliseconds(60))));
+            anim.KeyFrames.Add(new LinearDoubleKeyFrame(14.0, KeyTime.FromTimeSpan(TimeSpan.FromMilliseconds(130))));
+            anim.KeyFrames.Add(new LinearDoubleKeyFrame(-10.0, KeyTime.FromTimeSpan(TimeSpan.FromMilliseconds(200))));
+            anim.KeyFrames.Add(new LinearDoubleKeyFrame(8.0, KeyTime.FromTimeSpan(TimeSpan.FromMilliseconds(270))));
+            anim.KeyFrames.Add(new LinearDoubleKeyFrame(-4.0, KeyTime.FromTimeSpan(TimeSpan.FromMilliseconds(340))));
+            anim.KeyFrames.Add(new LinearDoubleKeyFrame(0.0, KeyTime.FromTimeSpan(TimeSpan.FromMilliseconds(420))));
+
+            _notifShakeRotate.BeginAnimation(RotateTransform.AngleProperty, anim, HandoffBehavior.SnapshotAndReplace);
+        }
+
+        private IEnumerable<(string Key, bool HasUnread)> EnumerateStatusNotificationStates()
+        {
+            if (_statusItemsControl == null)
+            {
+                yield break;
+            }
+
+            foreach (object? item in _statusItemsControl.Items)
+            {
+                if (item == null)
+                {
+                    continue;
+                }
+
+                Type itemType = item.GetType();
+                bool hasUnread = itemType.GetProperty("HasUnread", BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic)?.GetValue(item) is true;
+                var (appId, displayName, _, _) = StatusNotificationTrayRelay.ReadNotificationItemMetadata(item);
+                string key = !string.IsNullOrWhiteSpace(appId) ? appId! : (displayName ?? itemType.Name);
+                yield return (key, hasUnread);
+            }
+        }
+
+        private bool HasAnyUnackedAppUnread()
+        {
+            var activeUnread = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+            foreach (var (key, hasUnread) in EnumerateStatusNotificationStates())
+            {
+                if (hasUnread)
+                {
+                    activeUnread.Add(key);
+                }
+            }
+
+            _ackedAppUnreadKeys.RemoveWhere(k => !activeUnread.Contains(k));
+            foreach (string key in activeUnread)
+            {
+                if (!_ackedAppUnreadKeys.Contains(key))
+                {
+                    return true;
+                }
+            }
+
+            return false;
+        }
+
+        private void AcknowledgeCurrentUnreadApps()
+        {
+            foreach (var (key, hasUnread) in EnumerateStatusNotificationStates())
+            {
+                if (hasUnread)
+                {
+                    _ackedAppUnreadKeys.Add(key);
+                }
             }
         }
     }

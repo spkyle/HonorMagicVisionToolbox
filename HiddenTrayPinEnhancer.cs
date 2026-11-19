@@ -103,14 +103,20 @@ namespace TopBarAdaptiveColor
         private bool _barDragging;
         private bool _suppressNextClick;
 
-        // Native StatusNotificationItemsControl drag-to-arrow state
+        // Native StatusNotificationItemsControl drag-to-arrow & click-rescue state
         private string? _nativeDragAppId;
         private string? _nativeDragDisplayName;
+        private string? _nativeDragLaunchPath;
+        private IReadOnlyList<string>? _nativeDragProcNames;
         private ImageSource? _nativeDragIcon;
         private Button? _nativeDragButton;
         private POINT _nativeDragStartPx;
         private bool _nativeBarDragging;
         private bool _nativeSuppressNextClick;
+        private HashSet<uint>? _nativeClickPids;
+        private IntPtr _nativeClickPrevFg;
+        private HashSet<IntPtr>? _nativeClickPrevVisible;
+        private HashSet<IntPtr>? _nativeClickPrevRestored;
         private long _clickSequenceGen;
 
         internal static void RegisterCustomTrayRelay(CustomTrayClickHandler? handler)
@@ -952,19 +958,29 @@ namespace TopBarAdaptiveColor
                 return;
             }
 
-            var (appId, displayName, _, _) = StatusNotificationTrayRelay.ReadNotificationItemMetadata(item);
+            var (appId, displayName, launchPath, procNames) = StatusNotificationTrayRelay.ReadNotificationItemMetadata(item);
             if (string.IsNullOrWhiteSpace(appId) || !GetCursorPos(out POINT pt))
             {
                 return;
             }
 
+            string? fallbackProc = procNames != null && procNames.Count > 0 ? StripExe(procNames[0]) : appId;
+            HashSet<uint> targetPids = FindMatchingProcessIds(launchPath, fallbackProc);
+            var (prevVisible, prevRestored) = SnapshotVisibleAppWindows(targetPids);
+
             _nativeSuppressNextClick = false;
             _nativeDragAppId = appId;
             _nativeDragDisplayName = string.IsNullOrWhiteSpace(displayName) ? appId : displayName;
+            _nativeDragLaunchPath = launchPath;
+            _nativeDragProcNames = procNames;
             _nativeDragIcon = FindButtonImageSource(btn);
             _nativeDragButton = btn;
             _nativeDragStartPx = pt;
             _nativeBarDragging = false;
+            _nativeClickPids = targetPids;
+            _nativeClickPrevFg = GetForegroundWindow();
+            _nativeClickPrevVisible = prevVisible;
+            _nativeClickPrevRestored = prevRestored;
         }
 
         private void OnNativeStatusPreviewMouseMove(object sender, MouseEventArgs e)
@@ -989,13 +1005,25 @@ namespace TopBarAdaptiveColor
         {
             bool wasDragging = _nativeBarDragging;
             string? appId = _nativeDragAppId;
+            string? displayName = _nativeDragDisplayName;
+            string? launchPath = _nativeDragLaunchPath;
+            IReadOnlyList<string>? procNames = _nativeDragProcNames;
+            HashSet<uint>? targetPids = _nativeClickPids;
+            IntPtr prevFg = _nativeClickPrevFg;
+            HashSet<IntPtr>? prevVisible = _nativeClickPrevVisible;
+            HashSet<IntPtr>? prevRestored = _nativeClickPrevRestored;
             Button? btn = _nativeDragButton;
 
             _nativeDragAppId = null;
             _nativeDragDisplayName = null;
+            _nativeDragLaunchPath = null;
+            _nativeDragProcNames = null;
             _nativeDragIcon = null;
             _nativeDragButton = null;
             _nativeBarDragging = false;
+            _nativeClickPids = null;
+            _nativeClickPrevVisible = null;
+            _nativeClickPrevRestored = null;
 
             if (btn != null && btn.IsMouseCaptured)
             {
@@ -1032,6 +1060,65 @@ namespace TopBarAdaptiveColor
             {
                 _nativeSuppressNextClick = false;
                 e.Handled = true;
+                return;
+            }
+
+            if (!string.IsNullOrWhiteSpace(appId) && targetPids != null && prevVisible != null && prevRestored != null)
+            {
+                long clickGen = Interlocked.Increment(ref _clickSequenceGen);
+                _ = GetCursorPos(out POINT curPt);
+                string? procName = procNames != null && procNames.Count > 0 ? StripExe(procNames[0]) : appId;
+                var req = new CustomTrayClickRequest(
+                    launchPath,
+                    procName,
+                    displayName ?? appId,
+                    null,
+                    null,
+                    IntPtr.Zero,
+                    null,
+                    null,
+                    curPt.X,
+                    curPt.Y,
+                    IsRightClick: false,
+                    IsDoubleClick: false);
+                _ = EnsureNativeStatusSingleClickActivatedAsync(req, clickGen, targetPids, prevFg, prevVisible, prevRestored);
+            }
+        }
+
+        private async Task EnsureNativeStatusSingleClickActivatedAsync(
+            CustomTrayClickRequest req,
+            long clickGen,
+            HashSet<uint> targetPids,
+            IntPtr prevFg,
+            HashSet<IntPtr> prevVisible,
+            HashSet<IntPtr> prevRestored)
+        {
+            try
+            {
+                await Task.Delay(150).ConfigureAwait(false);
+                if (_disposed || Volatile.Read(ref _clickSequenceGen) != clickGen)
+                {
+                    return;
+                }
+
+                if (DidClickActivateTarget(targetPids, prevFg, prevVisible, prevRestored))
+                {
+                    return;
+                }
+
+                bool relayed = await RelayTrayClickCoreAsync(req).ConfigureAwait(false);
+                if (relayed)
+                {
+                    await EscalateSingleClickIfNeededAsync(req, clickGen, targetPids, prevFg, prevVisible, prevRestored).ConfigureAwait(false);
+                }
+                else
+                {
+                    await Task.Run(() => ActivateOrLaunchFallback(req.ExecutablePath, req.ProcessName)).ConfigureAwait(false);
+                }
+            }
+            catch (Exception ex)
+            {
+                DiagnosticLog.Warn($"EnsureNativeStatusSingleClickActivatedAsync error: {ex.Message}");
             }
         }
 
@@ -1079,7 +1166,7 @@ namespace TopBarAdaptiveColor
         {
             IntPtr topHwnd = new WindowInteropHelper(_topBarWindow).Handle;
             double scale = GetDpiScaleForWindow(topHwnd);
-            int threshPx = Math.Max(8, (int)Math.Round(7.0 * scale));
+            int threshPx = Math.Max(10, (int)Math.Round(10.0 * scale));
             int dx = curPx.X - startPx.X;
             int dy = curPx.Y - startPx.Y;
 

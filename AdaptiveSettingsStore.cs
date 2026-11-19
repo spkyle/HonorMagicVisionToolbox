@@ -20,6 +20,7 @@ namespace TopBarAdaptiveColor
         public static event Action<bool>? EnabledChanged;
         public static event Action<bool>? GapFixChanged;
         public static event Action<bool>? YoyoClawChanged;
+        public static event Action<bool>? NotificationAlertAnimationChanged;
         public static event Action<bool>? FastSettingsChanged;
         public static event Action<bool>? FastNotificationChanged;
         public static event Action<bool>? NativeTrayRightClickChanged;
@@ -37,6 +38,8 @@ namespace TopBarAdaptiveColor
         public static bool IsGapFixEnabled => IsModuleEnabled(ToolboxModuleIds.AdaptiveTopBarGapFix, true);
 
         public static bool IsYoyoClawVisible => IsModuleEnabled(ToolboxModuleIds.ShowYoyoClawButton, true);
+
+        public static bool IsNotificationAlertAnimationEnabled => IsModuleEnabled(ToolboxModuleIds.NotificationAlertAnimation, true);
 
         public static bool IsFastSettingsResponseEnabled => IsModuleEnabled(ToolboxModuleIds.FastSettingsResponse, true);
 
@@ -162,6 +165,10 @@ namespace TopBarAdaptiveColor
             else if (string.Equals(moduleId, ToolboxModuleIds.ShowYoyoClawButton, StringComparison.Ordinal))
             {
                 YoyoClawChanged?.Invoke(enabled);
+            }
+            else if (string.Equals(moduleId, ToolboxModuleIds.NotificationAlertAnimation, StringComparison.Ordinal))
+            {
+                NotificationAlertAnimationChanged?.Invoke(enabled);
             }
             else if (string.Equals(moduleId, ToolboxModuleIds.FastSettingsResponse, StringComparison.Ordinal))
             {
