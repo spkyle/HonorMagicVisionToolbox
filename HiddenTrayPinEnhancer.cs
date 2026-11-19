@@ -111,6 +111,7 @@ namespace TopBarAdaptiveColor
         private POINT _nativeDragStartPx;
         private bool _nativeBarDragging;
         private bool _nativeSuppressNextClick;
+        private long _clickSequenceGen;
 
         internal static void RegisterCustomTrayRelay(CustomTrayClickHandler? handler)
         {
@@ -1244,6 +1245,7 @@ namespace TopBarAdaptiveColor
             bool isDoubleClick,
             Point posDip)
         {
+            long clickGen = Interlocked.Increment(ref _clickSequenceGen);
             try
             {
                 CloseTopBarPopups();
@@ -1267,31 +1269,30 @@ namespace TopBarAdaptiveColor
                     isRightClick,
                     isDoubleClick);
 
-                CustomTrayClickHandler? externalRelay = Volatile.Read(ref _externalTrayRelay);
-                bool relayed = false;
-                if (externalRelay != null)
+                HashSet<uint>? targetPids = null;
+                IntPtr prevFg = IntPtr.Zero;
+                HashSet<IntPtr>? prevVisible = null;
+                HashSet<IntPtr>? prevRestored = null;
+                if (!isRightClick && !isDoubleClick)
                 {
-                    try
-                    {
-                        relayed = await externalRelay(req);
-                    }
-                    catch (Exception ex)
-                    {
-                        DiagnosticLog.Warn($"External custom tray relay error: {ex.Message}");
-                    }
+                    targetPids = FindMatchingProcessIds(vm.Entry.ExecutablePath, vm.Entry.ProcessName);
+                    prevFg = GetForegroundWindow();
+                    (prevVisible, prevRestored) = SnapshotVisibleAppWindows(targetPids);
                 }
 
-                if (!relayed)
-                {
-                    relayed = await Task.Run(() => FallbackRelayTrayClick(req));
-                }
+                bool relayed = await RelayTrayClickCoreAsync(req);
 
                 if (_disposed)
                 {
                     return;
                 }
 
-                if (!relayed)
+                if (relayed && !isRightClick && !isDoubleClick &&
+                    targetPids != null && prevVisible != null && prevRestored != null)
+                {
+                    _ = EscalateSingleClickIfNeededAsync(req, clickGen, targetPids, prevFg, prevVisible, prevRestored);
+                }
+                else if (!relayed)
                 {
                     if (isRightClick)
                     {
@@ -1307,6 +1308,165 @@ namespace TopBarAdaptiveColor
             {
                 DiagnosticLog.Warn($"Pinned tray click failed: {ex.Message}");
             }
+        }
+
+        private async Task<bool> RelayTrayClickCoreAsync(CustomTrayClickRequest req)
+        {
+            CustomTrayClickHandler? externalRelay = Volatile.Read(ref _externalTrayRelay);
+            bool relayed = false;
+            if (externalRelay != null)
+            {
+                try
+                {
+                    relayed = await externalRelay(req);
+                }
+                catch (Exception ex)
+                {
+                    DiagnosticLog.Warn($"External custom tray relay error: {ex.Message}");
+                }
+            }
+
+            if (!relayed)
+            {
+                relayed = await Task.Run(() => FallbackRelayTrayClick(req));
+            }
+
+            return relayed;
+        }
+
+        private async Task EscalateSingleClickIfNeededAsync(
+            CustomTrayClickRequest singleReq,
+            long clickGen,
+            HashSet<uint> targetPids,
+            IntPtr prevFg,
+            HashSet<IntPtr> prevVisible,
+            HashSet<IntPtr> prevRestored)
+        {
+            try
+            {
+                await Task.Delay(95).ConfigureAwait(false);
+                if (_disposed || Volatile.Read(ref _clickSequenceGen) != clickGen)
+                {
+                    return;
+                }
+
+                if (DidClickActivateTarget(targetPids, prevFg, prevVisible, prevRestored))
+                {
+                    return;
+                }
+
+                var dblReq = singleReq with { IsDoubleClick = true };
+
+                _ = await RelayTrayClickCoreAsync(dblReq).ConfigureAwait(false);
+                DiagnosticLog.Info($"Auto-escalated tray single-click to double-click (app='{singleReq.ProcessName ?? singleReq.DisplayName}').");
+
+                await Task.Delay(110).ConfigureAwait(false);
+                if (_disposed || Volatile.Read(ref _clickSequenceGen) != clickGen)
+                {
+                    return;
+                }
+
+                if (!DidClickActivateTarget(targetPids, prevFg, prevVisible, prevRestored))
+                {
+                    await Task.Run(() => ActivateOrLaunchFallback(singleReq.ExecutablePath, singleReq.ProcessName)).ConfigureAwait(false);
+                }
+            }
+            catch (Exception ex)
+            {
+                DiagnosticLog.Warn($"EscalateSingleClickIfNeededAsync error: {ex.Message}");
+            }
+        }
+
+        internal static bool DidClickActivateTarget(
+            HashSet<uint> targetPids,
+            IntPtr prevFg,
+            HashSet<IntPtr> prevVisible,
+            HashSet<IntPtr> prevRestored)
+        {
+            var gti = new GUITHREADINFO { cbSize = Marshal.SizeOf<GUITHREADINFO>() };
+            if (GetGUIThreadInfo(0, ref gti) &&
+                ((gti.flags & (GuiInMenuMode | GuiPopupMenuMode)) != 0 || gti.hwndMenuOwner != IntPtr.Zero))
+            {
+                return true;
+            }
+
+            if (targetPids.Count == 0)
+            {
+                return false;
+            }
+
+            IntPtr currFg = GetForegroundWindow();
+            if (currFg != IntPtr.Zero && currFg != prevFg)
+            {
+                _ = GetWindowThreadProcessId(currFg, out uint fgPid);
+                if (targetPids.Contains(fgPid))
+                {
+                    return true;
+                }
+            }
+
+            var (currVisible, currRestored) = SnapshotVisibleAppWindows(targetPids);
+            foreach (IntPtr h in currVisible)
+            {
+                if (!prevVisible.Contains(h))
+                {
+                    return true;
+                }
+            }
+
+            foreach (IntPtr h in currRestored)
+            {
+                if (!prevRestored.Contains(h))
+                {
+                    return true;
+                }
+            }
+
+            return false;
+        }
+
+        private static (HashSet<IntPtr> Visible, HashSet<IntPtr> Restored) SnapshotVisibleAppWindows(HashSet<uint> targetPids)
+        {
+            var visible = new HashSet<IntPtr>();
+            var restored = new HashSet<IntPtr>();
+            if (targetPids.Count == 0)
+            {
+                return (visible, restored);
+            }
+
+            EnumWindows((h, _) =>
+            {
+                if (!IsWindowVisible(h))
+                {
+                    return true;
+                }
+
+                GetWindowThreadProcessId(h, out uint pid);
+                if (!targetPids.Contains(pid))
+                {
+                    return true;
+                }
+
+                string cls = GetWindowClassNameSafe(h);
+                if (StatusNotificationTrayRelay.IsSystemHelperWindowClass(cls) ||
+                    cls.Contains("Tray", StringComparison.OrdinalIgnoreCase) ||
+                    cls.Contains("NotifyIcon", StringComparison.OrdinalIgnoreCase))
+                {
+                    return true;
+                }
+
+                if (GetWindowRect(h, out RECT r) && (r.Right - r.Left) > 12 && (r.Bottom - r.Top) > 12)
+                {
+                    visible.Add(h);
+                    if (!IsIconic(h))
+                    {
+                        restored.Add(h);
+                    }
+                }
+                return true;
+            }, IntPtr.Zero);
+
+            return (visible, restored);
         }
 
         private void CloseTopBarPopups()
@@ -1583,37 +1743,43 @@ namespace TopBarAdaptiveColor
             return (bestHwnd, bestPid, bestMsg, bestUid, bestV4);
         }
 
+        private static HashSet<uint> FindMatchingProcessIds(string? exePath, string? procName)
+        {
+            var pids = new HashSet<uint>();
+            string? normExe = string.IsNullOrWhiteSpace(exePath) ? null : NormalizePath(exePath);
+            string? procBase = !string.IsNullOrWhiteSpace(procName)
+                ? StripExe(procName)
+                : (!string.IsNullOrWhiteSpace(normExe) ? Path.GetFileNameWithoutExtension(normExe) : null);
+
+            foreach (Process p in Process.GetProcesses())
+            {
+                using (p)
+                {
+                    try
+                    {
+                        string? pPath = NotifyIconCatalog.TryGetProcessPathSafe(p);
+                        bool match = (!string.IsNullOrWhiteSpace(normExe) && !string.IsNullOrWhiteSpace(pPath) &&
+                                      string.Equals(NormalizePath(pPath), normExe, StringComparison.OrdinalIgnoreCase)) ||
+                                     (!string.IsNullOrWhiteSpace(procBase) &&
+                                      string.Equals(p.ProcessName, procBase, StringComparison.OrdinalIgnoreCase));
+                        if (match)
+                        {
+                            pids.Add((uint)p.Id);
+                        }
+                    }
+                    catch
+                    {
+                    }
+                }
+            }
+            return pids;
+        }
+
         private static void ActivateOrLaunchFallback(string? exePath, string? procName)
         {
             try
             {
-                string? normExe = string.IsNullOrWhiteSpace(exePath) ? null : NormalizePath(exePath);
-                string? procBase = !string.IsNullOrWhiteSpace(procName)
-                    ? StripExe(procName)
-                    : (!string.IsNullOrWhiteSpace(normExe) ? Path.GetFileNameWithoutExtension(normExe) : null);
-
-                var pids = new HashSet<uint>();
-                foreach (Process p in Process.GetProcesses())
-                {
-                    using (p)
-                    {
-                        try
-                        {
-                            string? pPath = NotifyIconCatalog.TryGetProcessPathSafe(p);
-                            bool match = (!string.IsNullOrWhiteSpace(normExe) && !string.IsNullOrWhiteSpace(pPath) &&
-                                          string.Equals(NormalizePath(pPath), normExe, StringComparison.OrdinalIgnoreCase)) ||
-                                         (!string.IsNullOrWhiteSpace(procBase) &&
-                                          string.Equals(p.ProcessName, procBase, StringComparison.OrdinalIgnoreCase));
-                            if (match)
-                            {
-                                pids.Add((uint)p.Id);
-                            }
-                        }
-                        catch
-                        {
-                        }
-                    }
-                }
+                HashSet<uint> pids = FindMatchingProcessIds(exePath, procName);
 
                 if (pids.Count > 0)
                 {
@@ -1822,6 +1988,29 @@ namespace TopBarAdaptiveColor
 
         [DllImport("user32.dll")]
         private static extern bool SetForegroundWindow(IntPtr hWnd);
+
+        [DllImport("user32.dll")]
+        private static extern IntPtr GetForegroundWindow();
+
+        [DllImport("user32.dll")]
+        private static extern bool GetGUIThreadInfo(uint idThread, ref GUITHREADINFO lpgui);
+
+        private const uint GuiInMenuMode = 0x00000004;
+        private const uint GuiPopupMenuMode = 0x00000010;
+
+        [StructLayout(LayoutKind.Sequential)]
+        private struct GUITHREADINFO
+        {
+            public int cbSize;
+            public uint flags;
+            public IntPtr hwndActive;
+            public IntPtr hwndFocus;
+            public IntPtr hwndCapture;
+            public IntPtr hwndMenuOwner;
+            public IntPtr hwndMoveSize;
+            public IntPtr hwndCaret;
+            public RECT rcCaret;
+        }
 
         [DllImport("user32.dll")]
         private static extern bool AllowSetForegroundWindow(uint dwProcessId);
