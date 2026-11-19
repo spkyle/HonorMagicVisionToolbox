@@ -1,0 +1,26 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <TargetFramework>net6.0-windows</TargetFramework>
+    <UseWPF>true</UseWPF>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <LangVersion>latest</LangVersion>
+    <AssemblyName>TopBarAdaptiveColor</AssemblyName>
+    <RootNamespace>TopBarAdaptiveColor</RootNamespace>
+    <AllowUnsafeBlocks>false</AllowUnsafeBlocks>
+    <Optimize>true</Optimize>
+  </PropertyGroup>
+  <ItemGroup>
+    <Compile Remove="ControlCenterSpeedBoost\**" />
+    <None Remove="ControlCenterSpeedBoost\**" />
+  </ItemGroup>
+  <Target Name="BuildControlCenterSpeedBoost" AfterTargets="Build" Inputs="ControlCenterSpeedBoost\ControlCenterSpeedBoost.cs;ControlCenterSpeedBoost\ControlCenterTrayUI.exe.config" Outputs="$(TargetDir)ControlCenterSpeedBoost.dll;$(TargetDir)ControlCenterTrayUI.exe.config">
+    <PropertyGroup>
+      <Net4Csc>$(WINDIR)\Microsoft.NET\Framework64\v4.0.30319\csc.exe</Net4Csc>
+      <Net4WpfDir>$(WINDIR)\Microsoft.NET\Framework64\v4.0.30319\WPF</Net4WpfDir>
+      <Net4FxDir>$(WINDIR)\Microsoft.NET\Framework64\v4.0.30319</Net4FxDir>
+    </PropertyGroup>
+    <Exec Command="&quot;$(Net4Csc)&quot; /nologo /target:library /platform:x64 /optimize+ &quot;/out:$(TargetDir)ControlCenterSpeedBoost.dll&quot; &quot;/r:$(Net4WpfDir)\PresentationFramework.dll&quot; &quot;/r:$(Net4WpfDir)\PresentationCore.dll&quot; &quot;/r:$(Net4WpfDir)\WindowsBase.dll&quot; &quot;/r:$(Net4FxDir)\System.Xaml.dll&quot; &quot;ControlCenterSpeedBoost\ControlCenterSpeedBoost.cs&quot;" />
+    <Copy SourceFiles="ControlCenterSpeedBoost\ControlCenterTrayUI.exe.config" DestinationFiles="$(TargetDir)ControlCenterTrayUI.exe.config" SkipUnchangedFiles="true" />
+  </Target>
+</Project>
