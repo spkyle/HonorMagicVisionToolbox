@@ -2380,7 +2380,7 @@ namespace TopBarAdaptiveColor
             }));
         }
 
-        private static (string? AppId, string? DisplayName, string? LaunchPath, IReadOnlyList<string>? ProcessNames) ReadNotificationItemMetadata(object item)
+        internal static (string? AppId, string? DisplayName, string? LaunchPath, IReadOnlyList<string>? ProcessNames) ReadNotificationItemMetadata(object item)
         {
             Type t = item.GetType();
             const BindingFlags flags = BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic;
@@ -2401,7 +2401,7 @@ namespace TopBarAdaptiveColor
             return (appId, displayName, launchPath, processNames);
         }
 
-        private static Button? FindNotificationButton(DependencyObject? start)
+        internal static Button? FindNotificationButton(DependencyObject? start)
         {
             DependencyObject? cur = start;
             while (cur != null)

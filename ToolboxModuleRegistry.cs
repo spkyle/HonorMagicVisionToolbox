@@ -138,8 +138,8 @@ namespace TopBarAdaptiveColor
                 ControlKind = ToolboxControlKind.Toggle,
                 TitleZh = "支持拖拽任意隐藏托盘图标固定到顶部栏",
                 TitleEn = "Drag any hidden tray icon to pin on top bar",
-                DescriptionZh = "点击顶部 ^ 展开隐藏托盘后，可将任意应用图标直接拖放到顶部状态栏固定显示，支持重启恢复、左键激活、右键菜单及 Shift+右键移除",
-                DescriptionEn = "Drag any icon from the overflow tray onto the top bar to pin it with persistence, left-click activation, native right-click, and Shift+RightClick removal",
+                DescriptionZh = "点击顶部 ^ 展开隐藏托盘后，可将任意应用图标直接拖放到顶部状态栏固定显示；支持直接把顶栏图标拖回 ^ 箭头上（或向下拖出）收起，以及重启恢复与原生右键菜单",
+                DescriptionEn = "Drag any icon from the overflow tray onto the top bar to pin it; drag bar icons directly onto the ^ arrow (or downward) to hide back into overflow",
                 DefaultEnabled = true
             },
             new()

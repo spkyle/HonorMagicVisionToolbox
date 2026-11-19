@@ -60,9 +60,11 @@ namespace TopBarAdaptiveColor
 
         private readonly Window _topBarWindow;
         private readonly ItemsControl? _statusItemsControl;
+        private readonly Button? _trayButton;
         private readonly Border? _backgroundBorder;
         private readonly TextBlock? _dateTimeText;
         private readonly MethodInfo? _openRemoveMenuMethod;
+        private readonly MethodInfo? _disableStatusAppMethod;
         private readonly MethodInfo? _closePopupsExceptMethod;
         private readonly object? _popupSurfaceNone;
         private readonly bool _origAllowDrop;
@@ -77,6 +79,10 @@ namespace TopBarAdaptiveColor
         private readonly DragEventHandler _previewDragOverHandler;
         private readonly DragEventHandler _previewDropHandler;
         private readonly DragEventHandler _previewDragLeaveHandler;
+        private readonly MouseButtonEventHandler _nativeDownHandler;
+        private readonly MouseEventHandler _nativeMoveHandler;
+        private readonly MouseButtonEventHandler _nativeUpHandler;
+        private readonly MouseEventHandler _nativeLostCaptureHandler;
 
         private DependencyPropertyDescriptor? _dateForegroundDescriptor;
         private DependencyPropertyDescriptor? _bgBorderDescriptor;
@@ -84,16 +90,27 @@ namespace TopBarAdaptiveColor
 
         private bool _useDarkForeground;
         private bool _isDropHighlighted;
+        private bool _trayArrowHighlighted;
+        private Brush? _trayArrowOrigBackground;
         private int _refreshRunning;
         private int _pendingRefresh;
         private bool _disposed;
 
-        // In-bar drag reorder / drag-off-to-unpin state
+        // In-bar drag reorder / drag-to-arrow or drag-off-to-unpin state
         private PinnedTrayItemViewModel? _barDragCandidate;
         private Button? _barDragButton;
         private POINT _barDragStartPx;
         private bool _barDragging;
         private bool _suppressNextClick;
+
+        // Native StatusNotificationItemsControl drag-to-arrow state
+        private string? _nativeDragAppId;
+        private string? _nativeDragDisplayName;
+        private ImageSource? _nativeDragIcon;
+        private Button? _nativeDragButton;
+        private POINT _nativeDragStartPx;
+        private bool _nativeBarDragging;
+        private bool _nativeSuppressNextClick;
 
         internal static void RegisterCustomTrayRelay(CustomTrayClickHandler? handler)
         {
@@ -108,9 +125,11 @@ namespace TopBarAdaptiveColor
             const BindingFlags instFlags = BindingFlags.Instance | BindingFlags.NonPublic | BindingFlags.Public;
             Type twType = topBarWindow.GetType();
             _statusItemsControl = twType.GetField("StatusNotificationItemsControl", instFlags)?.GetValue(topBarWindow) as ItemsControl;
+            _trayButton = twType.GetField("TrayButton", instFlags)?.GetValue(topBarWindow) as Button;
             _backgroundBorder = twType.GetField("TopBarBackgroundBorder", instFlags)?.GetValue(topBarWindow) as Border;
             _dateTimeText = twType.GetField("DateTimeText", instFlags)?.GetValue(topBarWindow) as TextBlock;
             _openRemoveMenuMethod = twType.GetMethod("OpenBarItemRemoveContextMenu", instFlags);
+            _disableStatusAppMethod = twType.GetMethod("DisableStatusNotificationApp", instFlags);
             _closePopupsExceptMethod = twType.GetMethod("CloseTopBarPopupSurfacesExcept", instFlags);
             if (_closePopupsExceptMethod != null)
             {
@@ -124,6 +143,10 @@ namespace TopBarAdaptiveColor
             _previewDragOverHandler = OnTopBarPreviewDragOver;
             _previewDropHandler = OnTopBarPreviewDrop;
             _previewDragLeaveHandler = OnTopBarPreviewDragLeave;
+            _nativeDownHandler = OnNativeStatusPreviewMouseLeftButtonDown;
+            _nativeMoveHandler = OnNativeStatusPreviewMouseMove;
+            _nativeUpHandler = OnNativeStatusPreviewMouseLeftButtonUp;
+            _nativeLostCaptureHandler = OnNativeStatusLostMouseCapture;
 
             _liveRefreshTimer = new DispatcherTimer(DispatcherPriority.Background, _topBarWindow.Dispatcher)
             {
@@ -132,6 +155,7 @@ namespace TopBarAdaptiveColor
             _liveRefreshTimer.Tick += (_, _) => QueueLiveRefresh();
 
             EnsureUiContainerInjected();
+            AttachNativeStatusDragHandlers();
             HookThemeObservers();
             ApplyOleDropSupport();
 
@@ -813,30 +837,14 @@ namespace TopBarAdaptiveColor
                 return;
             }
 
-            IntPtr topHwnd = new WindowInteropHelper(_topBarWindow).Handle;
-            double scale = GetDpiScaleForWindow(topHwnd);
-            int threshPx = Math.Max(8, (int)Math.Round(7.0 * scale));
-            int dx = pt.X - _barDragStartPx.X;
-            int dy = pt.Y - _barDragStartPx.Y;
-
-            if (!_barDragging)
-            {
-                if (dx * dx + dy * dy < threshPx * threshPx)
-                {
-                    return;
-                }
-
-                _barDragging = true;
-                _suppressNextClick = true;
-                _barDragButton.CaptureMouse();
-            }
-
-            bool unpinIntent = IsOutsideUnpinThreshold(topHwnd, pt, scale);
-            OverflowDragCoordinator.UpdateBarReorderGhost(
+            UpdateTopBarDragVisuals(
+                _barDragButton,
                 _barDragCandidate.IconSource,
-                unpinIntent ? "松开取消固定" : _barDragCandidate.DisplayName,
-                unpinIntent,
-                pt);
+                _barDragCandidate.DisplayName,
+                _barDragStartPx,
+                pt,
+                ref _barDragging,
+                ref _suppressNextClick);
         }
 
         private void OnPinnedButtonPreviewMouseLeftButtonUp(object sender, MouseButtonEventArgs e)
@@ -857,6 +865,7 @@ namespace TopBarAdaptiveColor
                 btn.ReleaseMouseCapture();
             }
 
+            SetTrayArrowDropHighlight(false);
             OverflowDragCoordinator.HideBarReorderGhost();
 
             if (wasDragging && dragged != null)
@@ -866,10 +875,10 @@ namespace TopBarAdaptiveColor
                 {
                     IntPtr topHwnd = new WindowInteropHelper(_topBarWindow).Handle;
                     double scale = GetDpiScaleForWindow(topHwnd);
-                    if (IsOutsideUnpinThreshold(topHwnd, pt, scale))
+                    if (IsOverUnpinTarget(topHwnd, pt, scale, out bool overArrow))
                     {
                         PinnedTrayStore.Remove(dragged.PinId);
-                        DiagnosticLog.Info($"Unpinned custom tray icon by dragging off TopBar: pinId={dragged.PinId}.");
+                        DiagnosticLog.Info($"Unpinned custom tray icon (overArrow={overArrow}): pinId={dragged.PinId}.");
                         return;
                     }
 
@@ -896,7 +905,248 @@ namespace TopBarAdaptiveColor
                 _barDragging = false;
                 _barDragCandidate = null;
                 _barDragButton = null;
+                SetTrayArrowDropHighlight(false);
                 OverflowDragCoordinator.HideBarReorderGhost();
+            }
+        }
+
+        private void AttachNativeStatusDragHandlers()
+        {
+            if (_statusItemsControl == null)
+            {
+                return;
+            }
+
+            _statusItemsControl.AddHandler(UIElement.PreviewMouseLeftButtonDownEvent, _nativeDownHandler, handledEventsToo: false);
+            _statusItemsControl.AddHandler(UIElement.PreviewMouseMoveEvent, _nativeMoveHandler, handledEventsToo: false);
+            _statusItemsControl.AddHandler(UIElement.PreviewMouseLeftButtonUpEvent, _nativeUpHandler, handledEventsToo: false);
+            _statusItemsControl.AddHandler(UIElement.LostMouseCaptureEvent, _nativeLostCaptureHandler, handledEventsToo: false);
+        }
+
+        private void DetachNativeStatusDragHandlers()
+        {
+            if (_statusItemsControl == null)
+            {
+                return;
+            }
+
+            _statusItemsControl.RemoveHandler(UIElement.PreviewMouseLeftButtonDownEvent, _nativeDownHandler);
+            _statusItemsControl.RemoveHandler(UIElement.PreviewMouseMoveEvent, _nativeMoveHandler);
+            _statusItemsControl.RemoveHandler(UIElement.PreviewMouseLeftButtonUpEvent, _nativeUpHandler);
+            _statusItemsControl.RemoveHandler(UIElement.LostMouseCaptureEvent, _nativeLostCaptureHandler);
+        }
+
+        private void OnNativeStatusPreviewMouseLeftButtonDown(object sender, MouseButtonEventArgs e)
+        {
+            if (_disposed || !AdaptiveSettingsStore.IsHiddenTrayIconPinningEnabled || e.ClickCount != 1)
+            {
+                return;
+            }
+
+            Button? btn = StatusNotificationTrayRelay.FindNotificationButton(e.OriginalSource as DependencyObject);
+            object? item = btn?.Tag ?? btn?.DataContext;
+            if (btn == null || item == null)
+            {
+                return;
+            }
+
+            var (appId, displayName, _, _) = StatusNotificationTrayRelay.ReadNotificationItemMetadata(item);
+            if (string.IsNullOrWhiteSpace(appId) || !GetCursorPos(out POINT pt))
+            {
+                return;
+            }
+
+            _nativeSuppressNextClick = false;
+            _nativeDragAppId = appId;
+            _nativeDragDisplayName = string.IsNullOrWhiteSpace(displayName) ? appId : displayName;
+            _nativeDragIcon = FindButtonImageSource(btn);
+            _nativeDragButton = btn;
+            _nativeDragStartPx = pt;
+            _nativeBarDragging = false;
+        }
+
+        private void OnNativeStatusPreviewMouseMove(object sender, MouseEventArgs e)
+        {
+            if (_disposed || _nativeDragButton == null || string.IsNullOrEmpty(_nativeDragAppId) ||
+                e.LeftButton != MouseButtonState.Pressed || !GetCursorPos(out POINT pt))
+            {
+                return;
+            }
+
+            UpdateTopBarDragVisuals(
+                _nativeDragButton,
+                _nativeDragIcon,
+                _nativeDragDisplayName ?? _nativeDragAppId,
+                _nativeDragStartPx,
+                pt,
+                ref _nativeBarDragging,
+                ref _nativeSuppressNextClick);
+        }
+
+        private void OnNativeStatusPreviewMouseLeftButtonUp(object sender, MouseButtonEventArgs e)
+        {
+            bool wasDragging = _nativeBarDragging;
+            string? appId = _nativeDragAppId;
+            Button? btn = _nativeDragButton;
+
+            _nativeDragAppId = null;
+            _nativeDragDisplayName = null;
+            _nativeDragIcon = null;
+            _nativeDragButton = null;
+            _nativeBarDragging = false;
+
+            if (btn != null && btn.IsMouseCaptured)
+            {
+                btn.ReleaseMouseCapture();
+            }
+
+            SetTrayArrowDropHighlight(false);
+            OverflowDragCoordinator.HideBarReorderGhost();
+
+            if (wasDragging && !string.IsNullOrWhiteSpace(appId))
+            {
+                e.Handled = true;
+                if (GetCursorPos(out POINT pt))
+                {
+                    IntPtr topHwnd = new WindowInteropHelper(_topBarWindow).Handle;
+                    double scale = GetDpiScaleForWindow(topHwnd);
+                    if (IsOverUnpinTarget(topHwnd, pt, scale, out bool overArrow))
+                    {
+                        try
+                        {
+                            _disableStatusAppMethod?.Invoke(_topBarWindow, new object[] { appId });
+                            DiagnosticLog.Info($"Unpinned native status icon (overArrow={overArrow}): appId={appId}.");
+                        }
+                        catch (Exception ex)
+                        {
+                            DiagnosticLog.Warn($"DisableStatusNotificationApp failed for '{appId}': {ex.Message}");
+                        }
+                    }
+                }
+                return;
+            }
+
+            if (_nativeSuppressNextClick)
+            {
+                _nativeSuppressNextClick = false;
+                e.Handled = true;
+            }
+        }
+
+        private void OnNativeStatusLostMouseCapture(object sender, MouseEventArgs e)
+        {
+            if (_nativeBarDragging)
+            {
+                _nativeBarDragging = false;
+                _nativeDragAppId = null;
+                _nativeDragDisplayName = null;
+                _nativeDragIcon = null;
+                _nativeDragButton = null;
+                SetTrayArrowDropHighlight(false);
+                OverflowDragCoordinator.HideBarReorderGhost();
+            }
+        }
+
+        private static ImageSource? FindButtonImageSource(DependencyObject root)
+        {
+            if (root is Image img && img.Source != null)
+            {
+                return img.Source;
+            }
+
+            int count = VisualTreeHelper.GetChildrenCount(root);
+            for (int i = 0; i < count; i++)
+            {
+                ImageSource? found = FindButtonImageSource(VisualTreeHelper.GetChild(root, i));
+                if (found != null)
+                {
+                    return found;
+                }
+            }
+            return null;
+        }
+
+        private void UpdateTopBarDragVisuals(
+            Button btn,
+            ImageSource? icon,
+            string label,
+            POINT startPx,
+            POINT curPx,
+            ref bool dragging,
+            ref bool suppressClick)
+        {
+            IntPtr topHwnd = new WindowInteropHelper(_topBarWindow).Handle;
+            double scale = GetDpiScaleForWindow(topHwnd);
+            int threshPx = Math.Max(8, (int)Math.Round(7.0 * scale));
+            int dx = curPx.X - startPx.X;
+            int dy = curPx.Y - startPx.Y;
+
+            if (!dragging)
+            {
+                if (dx * dx + dy * dy < threshPx * threshPx)
+                {
+                    return;
+                }
+
+                dragging = true;
+                suppressClick = true;
+                btn.CaptureMouse();
+            }
+
+            bool unpinIntent = IsOverUnpinTarget(topHwnd, curPx, scale, out bool overArrow);
+            SetTrayArrowDropHighlight(overArrow);
+            string ghostLabel = overArrow
+                ? $"松开收进托盘 · {label}"
+                : (unpinIntent ? $"松开取消固定 · {label}" : label);
+            OverflowDragCoordinator.UpdateBarReorderGhost(icon, ghostLabel, unpinIntent, curPx);
+        }
+
+        internal bool IsPointOverTrayArrowPx(POINT pt, double scale)
+        {
+            if (_trayButton == null || !_trayButton.IsVisible ||
+                _trayButton.ActualWidth <= 0 || _trayButton.ActualHeight <= 0)
+            {
+                return false;
+            }
+
+            try
+            {
+                Point tl = _trayButton.PointToScreen(new Point(0, 0));
+                Point br = _trayButton.PointToScreen(new Point(_trayButton.ActualWidth, _trayButton.ActualHeight));
+                int pad = Math.Max(4, (int)Math.Round(6.0 * scale));
+                return pt.X >= tl.X - pad && pt.X <= br.X + pad &&
+                       pt.Y >= tl.Y - pad && pt.Y <= br.Y + pad;
+            }
+            catch
+            {
+                return false;
+            }
+        }
+
+        internal bool IsOverUnpinTarget(IntPtr topBarHwnd, POINT pt, double scale, out bool overArrow)
+        {
+            overArrow = IsPointOverTrayArrowPx(pt, scale);
+            return overArrow || IsOutsideUnpinThreshold(topBarHwnd, pt, scale);
+        }
+
+        private void SetTrayArrowDropHighlight(bool active)
+        {
+            if (_trayButton == null || _trayArrowHighlighted == active)
+            {
+                return;
+            }
+
+            if (active)
+            {
+                _trayArrowOrigBackground = _trayButton.Background;
+                _trayButton.Background = new SolidColorBrush(Color.FromArgb(0x55, 0x38, 0x8B, 0xFF));
+                _trayArrowHighlighted = true;
+            }
+            else
+            {
+                _trayButton.Background = _trayArrowOrigBackground;
+                _trayArrowOrigBackground = null;
+                _trayArrowHighlighted = false;
             }
         }
 
@@ -1446,6 +1696,8 @@ namespace TopBarAdaptiveColor
             _topBarWindow.RemoveHandler(DragDrop.PreviewDragOverEvent, _previewDragOverHandler);
             _topBarWindow.RemoveHandler(DragDrop.PreviewDropEvent, _previewDropHandler);
             _topBarWindow.RemoveHandler(DragDrop.PreviewDragLeaveEvent, _previewDragLeaveHandler);
+            DetachNativeStatusDragHandlers();
+            SetTrayArrowDropHighlight(false);
             _topBarWindow.AllowDrop = _origAllowDrop;
 
             if (_dateTimeText != null && _themeChangedHandler != null)
