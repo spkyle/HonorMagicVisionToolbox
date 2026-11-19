@@ -31,7 +31,14 @@ if (-not $isAdmin) {
 $exitCode = 0
 try {
 
+# Strip Internet Mark-of-the-Web (Zone.Identifier) so .NET 4.8 / .NET 8 never blocks downloaded DLLs or scripts.
+Get-ChildItem -Path $PSScriptRoot -Recurse -File -ErrorAction SilentlyContinue | Unblock-File -ErrorAction SilentlyContinue
+
 $appDir = "C:\Program Files\HONOR\MagicAnimation\MagicTaskbarApp"
+if (-not (Test-Path $appDir)) {
+    throw "未找到荣耀 Magic 视界安装目录: $appDir"
+}
+
 $srcDll = Join-Path $PSScriptRoot "bin\Release\net6.0-windows\TopBarAdaptiveColor.dll"
 $dstDll = Join-Path $appDir "TopBarAdaptiveColor.dll"
 $srcRestore = Join-Path $PSScriptRoot "restore_topbar.ps1"
@@ -58,6 +65,9 @@ if (-not $needsBuild -and (Test-Path (Join-Path $PSScriptRoot "TopBarAdaptiveCol
     }
 }
 if ($needsBuild) {
+    if (-not (Get-Command dotnet -ErrorAction SilentlyContinue)) {
+        throw "未找到预编译的 bin\Release 产物且本机未安装 .NET SDK。请确认下载并完整解压 Release 页面中的 MagicVisionToolbox-v*.zip（不要只下载 Source code 源码包）。"
+    }
     Write-Host "正在编译最新补丁产物 (dotnet build -c Release)..." -ForegroundColor Cyan
     dotnet build (Join-Path $PSScriptRoot "TopBarAdaptiveColor.csproj") -c Release
     if ($LASTEXITCODE -ne 0) {
@@ -95,11 +105,13 @@ for ($attempt = 1; $attempt -le 3; $attempt++) {
 }
 
 if ($copied) {
+    Unblock-File -Path $dstDll -ErrorAction SilentlyContinue
     Write-Host "已部署 DLL: $dstDll" -ForegroundColor Green
 }
 
 if (Test-Path $srcRestore) {
     Copy-Item $srcRestore $dstRestore -Force -ErrorAction SilentlyContinue
+    Unblock-File -Path $dstRestore -ErrorAction SilentlyContinue
 }
 
 $json = Get-Content $rcPath -Raw -Encoding UTF8 | ConvertFrom-Json
@@ -109,7 +121,21 @@ if ($null -eq $json.runtimeOptions.configProperties) {
 $json.runtimeOptions.configProperties | Add-Member -NotePropertyName "STARTUP_HOOKS" -NotePropertyValue $dstDll -Force
 $utf8NoBom = New-Object System.Text.UTF8Encoding($false)
 [System.IO.File]::WriteAllText($rcPath, ($json | ConvertTo-Json -Depth 10), $utf8NoBom)
+$rcWriteUtc = (Get-Item $rcPath).LastWriteTimeUtc
 Write-Host "已更新 runtimeconfig STARTUP_HOOKS。" -ForegroundColor Green
+
+# Guard against Honor watchdog relaunching magictaskbar-ui before runtimeconfig was updated.
+$staleProcs = @(Get-Process -Name "magictaskbar-ui" -ErrorAction SilentlyContinue | Where-Object {
+    try { $_.StartTime.ToUniversalTime() -lt $rcWriteUtc } catch { $true }
+})
+if ($staleProcs.Count -gt 0) {
+    foreach ($p in $staleProcs) {
+        try {
+            Stop-Process -Id $p.Id -Force -ErrorAction SilentlyContinue
+            $null = $p.WaitForExit(3000)
+        } catch {}
+    }
+}
 
 Start-Sleep -Seconds 2
 $restarted = Get-Process -Name "magictaskbar-ui" -ErrorAction SilentlyContinue
@@ -152,6 +178,7 @@ if (Test-Path $ccExe) {
     }
 
     if ($boostCopied) {
+        Unblock-File -Path $dstBoostDll, $dstBoostCfg -ErrorAction SilentlyContinue
         Write-Host "已部署控制中心响应加速模块: $dstBoostDll" -ForegroundColor Green
     }
 
@@ -163,15 +190,27 @@ if (Test-Path $ccExe) {
     }
 }
 
+if (-not (Test-Path $dstDll)) {
+    throw "未检测到已部署的 DLL: $dstDll"
+}
+$verifyJson = Get-Content $rcPath -Raw -Encoding UTF8 | ConvertFrom-Json
+if ($verifyJson.runtimeOptions.configProperties.STARTUP_HOOKS -ne $dstDll) {
+    throw "STARTUP_HOOKS 校验失败，请检查 $rcPath 写入权限。"
+}
+
 Write-Host "完成！可在设置「Magic 视界工具箱」中随时开关全部功能（支持页面内一键卸载）。日志: $env:TEMP\MagicTaskbar\adaptive-topbar.log" -ForegroundColor Green
 
 } catch {
     Write-Host "部署失败: $($_.Exception.Message)" -ForegroundColor Red
     $exitCode = 1
 } finally {
-    if ($PauseOnExit) {
+    if ($PauseOnExit -or $exitCode -ne 0) {
         Write-Host "`n按任意键关闭窗口..." -ForegroundColor Gray
-        $null = $Host.UI.RawUI.ReadKey("NoEcho,IncludeKeyDown")
+        try {
+            $null = $Host.UI.RawUI.ReadKey("NoEcho,IncludeKeyDown")
+        } catch {
+            Read-Host "按回车键退出"
+        }
     }
 }
 
