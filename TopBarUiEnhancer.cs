@@ -1053,6 +1053,13 @@ namespace TopBarAdaptiveColor
 
             bool featureEnabled = AdaptiveSettingsStore.IsNotificationAlertAnimationEnabled;
             bool bridgeAlert = featureEnabled && _bridgeCoordinator.HasUnackedBellAlert;
+            if ((bridgeAlert || _bridgeCoordinator.HasAnyActiveCard) &&
+                AdaptiveSettingsStore.IsFastNotificationResponseEnabled &&
+                FindFirstVisibleWindowByTitle(MessageCenterWindowTitle) == IntPtr.Zero)
+            {
+                ScheduleMessageCenterPrewarmIfNeeded();
+            }
+
             bool sysUnread = _hasNotificationField?.GetValue(_window) is true;
 
             if (bridgeAlert && !sysUnread && _hasNotificationField != null)

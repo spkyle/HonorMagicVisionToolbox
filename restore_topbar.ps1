@@ -18,8 +18,8 @@ if (-not $isAdmin) {
     if ($PauseOnExit) { $argList += "-PauseOnExit" }
     if ($SelfDelete) { $argList += "-SelfDelete" }
     try {
-        $proc = Start-Process -FilePath "powershell.exe" -ArgumentList $argList -Verb RunAs -Wait -PassThru
-        exit $proc.ExitCode
+        $null = Start-Process -FilePath "powershell.exe" -ArgumentList $argList -Verb RunAs
+        exit 0
     } catch {
         Write-Host "已取消管理员授权，卸载中止。" -ForegroundColor Yellow
         if ($PauseOnExit) {

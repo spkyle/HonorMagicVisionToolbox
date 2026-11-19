@@ -807,6 +807,8 @@ namespace MessageCenterBridge
             SetProp(item, "Title", string.IsNullOrEmpty(rec.Title) ? rec.DisplayName : rec.Title);
             SetProp(item, "Description", string.IsNullOrEmpty(rec.Description) ? "收到新未读消息，点击跳转查看" : rec.Description);
             SetProp(item, "LargeIconPath", iconPath);
+            SetProp(item, "ActionResponseBtnIndex", -1);
+            SetProp(item, "ActionResponseText", string.Empty);
 
             Type listType = typeof(List<>).MakeGenericType(_dataItemType3Type);
             IList items = (IList)Activator.CreateInstance(listType);
@@ -816,9 +818,9 @@ namespace MessageCenterBridge
             SetProp(msg, "Type", _tipsTypeEnum != null ? Enum.ToObject(_tipsTypeEnum, 9) : 9);
             SetProp(msg, "Mode", _tipsModeEnum != null ? Enum.ToObject(_tipsModeEnum, 0) : 0);
             SetProp(msg, "Level", _tipsLevelEnum != null ? Enum.ToObject(_tipsLevelEnum, 0) : 0);
-            SetProp(msg, "ShowMode", _showModeEnum != null ? Enum.ToObject(_showModeEnum, 2) : 2);
+            SetProp(msg, "ShowMode", _showModeEnum != null ? Enum.ToObject(_showModeEnum, 0) : 0);
             SetProp(msg, "Guid", rec.Guid);
-            SetProp(msg, "GuidDes", rec.Guid);
+            SetProp(msg, "GuidDes", string.Empty);
             SetProp(msg, "Timestamp", sec);
             SetProp(msg, "TitleTxt", rec.DisplayName ?? rec.Title ?? rec.AppKey);
             SetProp(msg, "TitleIcon", iconPath);

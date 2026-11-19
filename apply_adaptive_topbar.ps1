@@ -16,8 +16,8 @@ if (-not $isAdmin) {
     $argList = @("-NoProfile", "-ExecutionPolicy", "Bypass", "-File", "`"$PSCommandPath`"", "-Elevated")
     if ($PauseOnExit) { $argList += "-PauseOnExit" }
     try {
-        $proc = Start-Process -FilePath "powershell.exe" -ArgumentList $argList -Verb RunAs -Wait -PassThru
-        exit $proc.ExitCode
+        $null = Start-Process -FilePath "powershell.exe" -ArgumentList $argList -Verb RunAs
+        exit 0
     } catch {
         Write-Host "已取消管理员授权，安装中止。" -ForegroundColor Yellow
         if ($PauseOnExit) {
@@ -142,13 +142,6 @@ if ($staleProcs.Count -gt 0) {
             $null = $p.WaitForExit(3000)
         } catch {}
     }
-}
-
-Start-Sleep -Seconds 2
-$restarted = Get-Process -Name "magictaskbar-ui" -ErrorAction SilentlyContinue
-if (-not $restarted) {
-    $exePath = Join-Path $appDir "magictaskbar-ui.exe"
-    Start-Process "explorer.exe" -ArgumentList ('"' + $exePath + '"')
 }
 
 if (Test-Path $ccExe) {
@@ -306,6 +299,14 @@ if (Test-Path $mcExe) {
             } catch {}
         }
     }
+}
+
+# Launch magictaskbar-ui after MessageCenterBridge is in place so its startup pre-warm loads the bridge cleanly.
+Start-Sleep -Seconds 2
+$restarted = Get-Process -Name "magictaskbar-ui" -ErrorAction SilentlyContinue
+if (-not $restarted) {
+    $exePath = Join-Path $appDir "magictaskbar-ui.exe"
+    Start-Process "explorer.exe" -ArgumentList ('"' + $exePath + '"')
 }
 
 if (-not (Test-Path $dstDll)) {

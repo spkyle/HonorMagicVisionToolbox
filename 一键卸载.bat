@@ -11,3 +11,4 @@ if errorlevel 1 (
     pause
     exit /b %errorlevel%
 )
+exit /b 0
