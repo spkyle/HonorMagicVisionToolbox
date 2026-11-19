@@ -194,6 +194,7 @@ namespace ControlCenterSpeedBoost
         private bool _preWarmCloakFailed;
         private bool _preWarmPrevShowActivated = true;
         private double _preWarmPrevOpacity = 1.0;
+        private bool _windowFrameRendered;
         private FileSystemWatcher _configWatcher;
 
         private ControlCenterWindowOptimizer(Window window)
@@ -641,6 +642,7 @@ namespace ControlCenterSpeedBoost
                     BoostLog.Warn("DWMWA_CLOAK unsupported during pre-warm; used off-screen Opacity=0 fallback.");
                 }
                 _isPreWarming = false;
+                _windowFrameRendered = false;
                 BoostLog.Info("Pre-warmed AiDesktopMainWindow, plugins & CompositionAcrylic surface cleanly.");
             }
         }
@@ -717,15 +719,38 @@ namespace ControlCenterSpeedBoost
                 return;
             }
 
+            if (e.NewValue is bool && (bool)e.NewValue)
+            {
+                EnsureShowReadyOpacity();
+                if (!_window.IsVisible || !_windowFrameRendered)
+                {
+                    // Prevent the acrylic backdrop window from appearing a frame ahead of MainWindow buttons.
+                    TrySetWindowCloaked(_compHolderWindow, true);
+                    _window.Dispatcher.BeginInvoke(DispatcherPriority.Input, new Action(delegate
+                    {
+                        if (!_isPreWarming && _compHolderWindow != null && _compHolderWindow.IsVisible)
+                        {
+                            TrySetWindowCloaked(_compHolderWindow, false);
+                        }
+                    }));
+                }
+                return;
+            }
+
             if (e.NewValue is bool && !(bool)e.NewValue)
             {
-                // Sync main window hide onto the exact same frame as the acrylic backdrop
-                // so the backdrop never closes noticeably before the menu panel or flashes before exiting.
+                _windowFrameRendered = false;
+                // Hide main window before resetting opacity so the next open never shows a transparent
+                // frame over the blur backdrop while waiting for VisibilityChanged to restore Opacity.
                 try
                 {
                     StopStoryboardSafely(_showStoryboard);
-                    _window.Opacity = 0.0;
                     _window.Visibility = Visibility.Hidden;
+                    _window.Opacity = 1.0;
+                    if (_gridWnd1 != null)
+                    {
+                        _gridWnd1.Opacity = 1.0;
+                    }
                     if (_lastHideTimeField != null)
                     {
                         _lastHideTimeField.SetValue(_window, DateTime.MinValue);
@@ -759,31 +784,48 @@ namespace ControlCenterSpeedBoost
                 {
                     StopStoryboardSafely(_hideStoryboard);
                 }
+                EnsureShowReadyOpacity();
                 TrySetWindowCloaked(_window, false);
-                TrySetWindowCloaked(_compHolderWindow, false);
-                if (_compHolderWindow != null && _compHolderWindow.Opacity < 0.99)
+
+                if (fast && _compHolderWindow != null)
                 {
-                    _compHolderWindow.Opacity = 1.0;
+                    if (!_windowFrameRendered)
+                    {
+                        TrySetWindowCloaked(_compHolderWindow, true);
+                        _window.Dispatcher.BeginInvoke(DispatcherPriority.Render, new Action(delegate
+                        {
+                            _windowFrameRendered = true;
+                            if (!_isPreWarming)
+                            {
+                                TrySetWindowCloaked(_compHolderWindow, false);
+                            }
+                        }));
+                    }
+                    else
+                    {
+                        TrySetWindowCloaked(_compHolderWindow, false);
+                    }
                 }
-                if (_window.Opacity < 0.99)
+                else
                 {
-                    _window.Opacity = 1.0;
-                }
-                if (_gridWnd1 != null && fast && _gridWnd1.Opacity < 0.99)
-                {
-                    _gridWnd1.Opacity = 1.0;
+                    _windowFrameRendered = true;
+                    TrySetWindowCloaked(_compHolderWindow, false);
                 }
             }
-            else if (e.NewValue is bool && !(bool)e.NewValue && !fast)
+            else if (e.NewValue is bool && !(bool)e.NewValue)
             {
-                StopStoryboardSafely(_showStoryboard);
-                if (_gridWnd1 != null && _gridWnd1.Opacity > 0.01)
+                _windowFrameRendered = false;
+                if (!fast)
                 {
-                    _gridWnd1.Opacity = 0.0;
-                }
-                if (_window.Opacity > 0.01)
-                {
-                    _window.Opacity = 0.0;
+                    StopStoryboardSafely(_showStoryboard);
+                    if (_gridWnd1 != null && _gridWnd1.Opacity > 0.01)
+                    {
+                        _gridWnd1.Opacity = 0.0;
+                    }
+                    if (_window.Opacity > 0.01)
+                    {
+                        _window.Opacity = 0.0;
+                    }
                 }
             }
 
