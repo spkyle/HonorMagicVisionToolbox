@@ -188,12 +188,13 @@ namespace TopBarAdaptiveColor
             }
 
             double scale = GetDpiScaleForWindow(hwnd);
-            int padBottom = Math.Max(8, (int)Math.Round(16.0 * scale));
+            int padBottom = Math.Max(14, (int)Math.Round(18.0 * scale));
+            int padSide = Math.Max(6, (int)Math.Round(8.0 * scale));
             rectPx = new RECT
             {
-                Left = winRect.Left,
-                Top = winRect.Top,
-                Right = winRect.Right,
+                Left = winRect.Left - padSide,
+                Top = winRect.Top - padSide,
+                Right = winRect.Right + padSide,
                 Bottom = winRect.Bottom + padBottom
             };
             return rectPx.Right > rectPx.Left && rectPx.Bottom > rectPx.Top;
@@ -1113,9 +1114,10 @@ namespace TopBarAdaptiveColor
             {
                 Point tl = _trayButton.PointToScreen(new Point(0, 0));
                 Point br = _trayButton.PointToScreen(new Point(_trayButton.ActualWidth, _trayButton.ActualHeight));
-                int pad = Math.Max(4, (int)Math.Round(6.0 * scale));
-                return pt.X >= tl.X - pad && pt.X <= br.X + pad &&
-                       pt.Y >= tl.Y - pad && pt.Y <= br.Y + pad;
+                int padX = Math.Max(8, (int)Math.Round(10.0 * scale));
+                int padY = Math.Max(6, (int)Math.Round(8.0 * scale));
+                return pt.X >= tl.X - padX && pt.X <= br.X + padX &&
+                       pt.Y >= tl.Y - padY && pt.Y <= br.Y + padY;
             }
             catch
             {
@@ -4057,7 +4059,7 @@ namespace TopBarAdaptiveColor
                 return;
             }
 
-            disp.BeginInvoke(DispatcherPriority.Input, new Action(SyncOverflowMonitorState));
+            disp.BeginInvoke(DispatcherPriority.Send, new Action(SyncOverflowMonitorState));
         }
 
         private static void SyncOverflowMonitorState()
@@ -4330,9 +4332,18 @@ namespace TopBarAdaptiveColor
             if (msg == WmLButtonDown)
             {
                 IntPtr ov = _activeOverflowHwnd;
+                if (ov == IntPtr.Zero || !IsWindowVisible(ov))
+                {
+                    ov = FindVisibleOverflowWindow();
+                    if (ov != IntPtr.Zero)
+                    {
+                        _activeOverflowHwnd = ov;
+                    }
+                }
+
                 if (ov != IntPtr.Zero && IsWindowVisible(ov) &&
                     HiddenTrayPinEnhancer.GetWindowRect(ov, out HiddenTrayPinEnhancer.RECT r) &&
-                    PointInRect(r, info.pt))
+                    PointInRect(new HiddenTrayPinEnhancer.RECT { Left = r.Left - 4, Top = r.Top - 4, Right = r.Right + 4, Bottom = r.Bottom + 4 }, info.pt))
                 {
                     _activeOverflowRect = r;
                     var session = new ActiveDragSession
@@ -4352,13 +4363,11 @@ namespace TopBarAdaptiveColor
                 if (session != null)
                 {
                     double scale = HiddenTrayPinEnhancer.GetDpiScaleForWindow(session.OverflowHwnd);
-                    int threshPx = Math.Max(8, (int)Math.Round(6.0 * scale));
+                    int threshPx = Math.Max(6, (int)Math.Round(5.0 * scale));
                     int dx = info.pt.X - session.StartPt.X;
                     int dy = info.pt.Y - session.StartPt.Y;
 
-                    if (!session.DragStarted &&
-                        dx * dx + dy * dy >= threshPx * threshPx &&
-                        (!PointInRect(session.OverflowRect, info.pt) || info.pt.Y < session.OverflowRect.Top + 4))
+                    if (!session.DragStarted && dx * dx + dy * dy >= threshPx * threshPx)
                     {
                         session.DragStarted = true;
                     }
