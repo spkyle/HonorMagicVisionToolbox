@@ -23,6 +23,9 @@ namespace TopBarAdaptiveColor
     {
         private const uint WmSecondOpen = 0x0800; // UICommonTools.WM_SECONDOPEN (WM_USER * 2) in MessageCenterUI.exe
         private const uint WmControlCenterTray = 0x0401; // WM_USER + 1 tray callback on HonorControlCenterWndTray
+        private const uint WmActivate = 0x0006; // WA_INACTIVE (wParam=0) deactivates external flyouts to trigger native Hide
+        private long _lastNotificationOpenedTick;
+        private long _notifToggleGeneration;
         private const int ControlCenterTrayIconId = 100;
         private const int WmLButtonUp = 0x0202;
         private const int PopupSurfaceControlCenter = 6;
@@ -387,25 +390,32 @@ namespace TopBarAdaptiveColor
             }
         }
 
+        private void CloseOtherPopupSurfaces(int popupSurfaceValue)
+        {
+            if (_closePopupSurfacesExceptMethod == null)
+            {
+                return;
+            }
+
+            ParameterInfo[] ps = _closePopupSurfacesExceptMethod.GetParameters();
+            object?[] args = ps.Length == 1
+                ? new object?[]
+                {
+                    ps[0].ParameterType.IsEnum
+                        ? Enum.ToObject(ps[0].ParameterType, popupSurfaceValue)
+                        : (ps[0].ParameterType == typeof(int)
+                            ? popupSurfaceValue
+                            : (ps[0].ParameterType.IsValueType ? Activator.CreateInstance(ps[0].ParameterType) : null))
+                }
+                : Array.Empty<object?>();
+            _closePopupSurfacesExceptMethod.Invoke(_window, args);
+        }
+
         private void PrepareFastPopupOpen(int popupSurfaceValue, FieldInfo? trackerField, bool clearNotificationBadge)
         {
             try
             {
-                if (_closePopupSurfacesExceptMethod != null)
-                {
-                    ParameterInfo[] ps = _closePopupSurfacesExceptMethod.GetParameters();
-                    object?[] args = ps.Length == 1
-                        ? new object?[]
-                        {
-                            ps[0].ParameterType.IsEnum
-                                ? Enum.ToObject(ps[0].ParameterType, popupSurfaceValue)
-                                : (ps[0].ParameterType == typeof(int)
-                                    ? popupSurfaceValue
-                                    : (ps[0].ParameterType.IsValueType ? Activator.CreateInstance(ps[0].ParameterType) : null))
-                        }
-                        : Array.Empty<object?>();
-                    _closePopupSurfacesExceptMethod.Invoke(_window, args);
-                }
+                CloseOtherPopupSurfaces(popupSurfaceValue);
 
                 if (clearNotificationBadge)
                 {
@@ -458,13 +468,17 @@ namespace TopBarAdaptiveColor
             }
             _lastControlCenterFastOpenTick = nowTick;
 
-            PrepareFastPopupOpen(PopupSurfaceControlCenter, _controlCenterTrackerField, clearNotificationBadge: false);
-
             if (HasVisibleControlCenterWindow())
             {
-                DiagnosticLog.Info("ControlCenterButton clicked while AiDesktopMainWindow visible; skipping duplicate tray toggle.");
-                return;
+                CloseOtherPopupSurfaces(PopupSurfaceControlCenter);
+                if (TryDismissVisibleControlCenterWindow(out string dismissMethod))
+                {
+                    DiagnosticLog.Info($"ControlCenterButton toggled visible AiDesktopMainWindow closed ({dismissMethod}).");
+                    return;
+                }
             }
+
+            PrepareFastPopupOpen(PopupSurfaceControlCenter, _controlCenterTrackerField, clearNotificationBadge: false);
 
             if (TryPostControlCenterTrayOpen(out IntPtr trayHwnd))
             {
@@ -494,7 +508,60 @@ namespace TopBarAdaptiveColor
         }
 
         internal static bool HasVisibleControlCenterWindow() =>
-            HasVisibleWindowByTitle(ControlCenterWindowTitle);
+            FindFirstVisibleWindowByTitle(ControlCenterWindowTitle) != IntPtr.Zero;
+
+        internal static bool TryDismissVisibleControlCenterWindow(out string method)
+        {
+            IntPtr visibleHwnd = FindFirstVisibleWindowByTitle(ControlCenterWindowTitle);
+            if (visibleHwnd == IntPtr.Zero)
+            {
+                method = "none";
+                return false;
+            }
+
+            IntPtr trayHwnd = FindWindowExW(IntPtr.Zero, IntPtr.Zero, ControlCenterTrayClassName, null);
+            if (trayHwnd != IntPtr.Zero)
+            {
+                _ = GetWindowThreadProcessId(visibleHwnd, out uint visiblePid);
+                _ = GetWindowThreadProcessId(trayHwnd, out uint trayPid);
+                if (visiblePid != 0 && visiblePid == trayPid && TryPostControlCenterTrayOpen(out IntPtr postedTrayHwnd))
+                {
+                    method = $"tray PostMessage hwnd=0x{postedTrayHwnd.ToInt64():X}";
+                    return true;
+                }
+            }
+
+            int dismissed = TryDismissVisibleWindowsByTitle(ControlCenterWindowTitle);
+            method = $"WM_ACTIVATE count={dismissed}";
+            return dismissed > 0;
+        }
+
+        internal static int TryDismissVisibleWindowsByTitle(string title)
+        {
+            int posted = 0;
+            IntPtr hAfter = IntPtr.Zero;
+            while (true)
+            {
+                IntPtr hWnd = FindWindowExW(IntPtr.Zero, hAfter, null, title);
+                if (hWnd == IntPtr.Zero)
+                {
+                    break;
+                }
+
+                hAfter = hWnd;
+                if (!IsWindowVisible(hWnd))
+                {
+                    continue;
+                }
+
+                if (PostMessageW(hWnd, WmActivate, IntPtr.Zero, IntPtr.Zero))
+                {
+                    posted++;
+                }
+            }
+
+            return posted;
+        }
 
         private static void LaunchControlCenterFallback(object? sysService, MethodInfo? openMethod)
         {
@@ -540,17 +607,30 @@ namespace TopBarAdaptiveColor
             _lastNotificationFastOpenTick = nowTick;
 
             AcknowledgeCurrentUnreadApps();
-            PrepareFastPopupOpen(PopupSurfaceNotification, _notificationTrackerField, clearNotificationBadge: true);
-            RefreshNotificationAlertVisual(allowImmediateShake: false);
 
             bool wasVisibleBefore = HasVisibleMessageCenterWindow();
             if (wasVisibleBefore)
             {
-                // Activating TopBar on click already deactivates and hides the open MessageCenterUI window;
-                // do not re-post WM_SECONDOPEN or it fights Deactivated and causes a visible flicker.
-                DiagnosticLog.Info("NotificationButton clicked while MessageCenterUI visible; skipping duplicate WM_SECONDOPEN.");
+                _hasNotificationField?.SetValue(_window, false);
+                RefreshNotificationAlertVisual(allowImmediateShake: false);
+                CloseOtherPopupSurfaces(PopupSurfaceNotification);
+                long seq = System.Threading.Interlocked.Increment(ref _notifToggleGeneration);
+                int dismissed = TryDismissVisibleWindowsByTitle(MessageCenterWindowTitle);
+                DiagnosticLog.Info($"NotificationButton toggled visible MessageCenterUI closed via WM_ACTIVATE(WA_INACTIVE) (count={dismissed}).");
+
+                long elapsedSinceOpen = nowTick - _lastNotificationOpenedTick;
+                if (elapsedSinceOpen >= 0 && elapsedSinceOpen < 560)
+                {
+                    int retryDelayMs = (int)Math.Clamp(580 - elapsedSinceOpen, 80, 580);
+                    _ = RetryDismissMessageCenterIfStillOpenAsync(seq, retryDelayMs);
+                }
                 return;
             }
+
+            long openGen = System.Threading.Interlocked.Increment(ref _notifToggleGeneration);
+            _lastNotificationOpenedTick = nowTick;
+            PrepareFastPopupOpen(PopupSurfaceNotification, _notificationTrackerField, clearNotificationBadge: true);
+            RefreshNotificationAlertVisual(allowImmediateShake: false);
 
             bool posted = TryPostMessageCenterSecondOpen(out int postedCount, out int candidateCount);
             object? sysService = _systemServiceField?.GetValue(_window);
@@ -564,7 +644,9 @@ namespace TopBarAdaptiveColor
                 Task.Run(async () =>
                 {
                     await Task.Delay(350).ConfigureAwait(false);
-                    if (_disposed || HasVisibleMessageCenterWindow())
+                    if (_disposed ||
+                        System.Threading.Volatile.Read(ref _notifToggleGeneration) != openGen ||
+                        HasVisibleMessageCenterWindow())
                     {
                         return;
                     }
@@ -610,10 +692,31 @@ namespace TopBarAdaptiveColor
             }
         }
 
-        internal static bool HasVisibleMessageCenterWindow() =>
-            HasVisibleWindowByTitle(MessageCenterWindowTitle);
+        private async Task RetryDismissMessageCenterIfStillOpenAsync(long expectedGeneration, int delayMs)
+        {
+            try
+            {
+                await Task.Delay(delayMs).ConfigureAwait(false);
+                if (_disposed ||
+                    System.Threading.Volatile.Read(ref _notifToggleGeneration) != expectedGeneration ||
+                    !HasVisibleMessageCenterWindow())
+                {
+                    return;
+                }
 
-        private static bool HasVisibleWindowByTitle(string title)
+                int retried = TryDismissVisibleWindowsByTitle(MessageCenterWindowTitle);
+                DiagnosticLog.Info($"NotificationButton retried MessageCenterUI dismiss after open debounce (count={retried}).");
+            }
+            catch (Exception ex)
+            {
+                DiagnosticLog.Warn($"NotificationButton delayed dismiss retry skipped: {ex.Message}");
+            }
+        }
+
+        internal static bool HasVisibleMessageCenterWindow() =>
+            FindFirstVisibleWindowByTitle(MessageCenterWindowTitle) != IntPtr.Zero;
+
+        private static IntPtr FindFirstVisibleWindowByTitle(string title)
         {
             IntPtr hAfter = IntPtr.Zero;
             while (true)
@@ -621,13 +724,13 @@ namespace TopBarAdaptiveColor
                 IntPtr hWnd = FindWindowExW(IntPtr.Zero, hAfter, null, title);
                 if (hWnd == IntPtr.Zero)
                 {
-                    return false;
+                    return IntPtr.Zero;
                 }
 
                 hAfter = hWnd;
                 if (IsWindowVisible(hWnd))
                 {
-                    return true;
+                    return hWnd;
                 }
             }
         }

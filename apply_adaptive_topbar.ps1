@@ -198,7 +198,7 @@ if ($verifyJson.runtimeOptions.configProperties.STARTUP_HOOKS -ne $dstDll) {
     throw "STARTUP_HOOKS 校验失败，请检查 $rcPath 写入权限。"
 }
 
-Write-Host "完成！可在设置「Magic 视界工具箱」中随时开关全部功能（支持页面内一键卸载）。日志: $env:TEMP\MagicTaskbar\adaptive-topbar.log" -ForegroundColor Green
+Write-Host "部署完成。可在 Magic 视界设置「Magic 视界工具箱」中调整各项开关或卸载。日志: $env:TEMP\MagicTaskbar\adaptive-topbar.log" -ForegroundColor Green
 
 } catch {
     Write-Host "部署失败: $($_.Exception.Message)" -ForegroundColor Red

@@ -779,8 +779,8 @@ namespace TopBarAdaptiveColor
                 var pageSubtitle = new TextBlock
                 {
                     Text = isChinese
-                        ? $"模块化增强与 Bug 修复开关 · 开源仓库：{ToolboxModuleRegistry.GitHubRepoUrl}"
-                        : $"Modular enhancements and bug fixes · GitHub: {ToolboxModuleRegistry.GitHubRepoUrl}",
+                        ? $"功能配置与修复选项 · {ToolboxModuleRegistry.GitHubRepoUrl}"
+                        : $"Configuration & fixes · {ToolboxModuleRegistry.GitHubRepoUrl}",
                     FontFamily = baseFont,
                     FontSize = 12.0,
                     TextWrapping = TextWrapping.Wrap,
