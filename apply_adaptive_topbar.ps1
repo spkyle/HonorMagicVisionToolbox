@@ -54,7 +54,14 @@ $dstBoostDll = Join-Path $ccDir "ControlCenterSpeedBoost.dll"
 $dstBoostCfg = Join-Path $ccDir "ControlCenterTrayUI.exe.config"
 $bakBoostCfg = Join-Path $ccDir "ControlCenterTrayUI.exe.config.bak"
 
-$needsBuild = (-not (Test-Path $srcDll)) -or (-not (Test-Path $srcBoostDll)) -or (-not (Test-Path $srcBoostCfg))
+$mcDir = "C:\Program Files\HONOR\PCManager"
+$mcExe = Join-Path $mcDir "MessageCenterUI.exe"
+$srcBridgeDll = Join-Path $PSScriptRoot "bin\Release\net6.0-windows\MessageCenterBridge.dll"
+$dstBridgeDll = Join-Path $mcDir "MessageCenterBridge.dll"
+$dstBridgeCfg = Join-Path $mcDir "MessageCenterUI.exe.config"
+$bakBridgeCfg = Join-Path $mcDir "MessageCenterUI.exe.config.bak"
+
+$needsBuild = (-not (Test-Path $srcDll)) -or (-not (Test-Path $srcBoostDll)) -or (-not (Test-Path $srcBoostCfg)) -or (-not (Test-Path $srcBridgeDll))
 if (-not $needsBuild -and (Test-Path (Join-Path $PSScriptRoot "TopBarAdaptiveColor.csproj"))) {
     $dllTime = (Get-Item $srcDll).LastWriteTimeUtc
     $newerCs = Get-ChildItem $PSScriptRoot -Recurse -Filter *.cs -ErrorAction SilentlyContinue |
@@ -209,6 +216,95 @@ if (Test-Path $ccExe) {
     if (-not $ccRestarted) {
         # Launch via explorer.exe so ControlCenterTrayUI stays at Medium integrity for non-elevated TopBar PostMessage.
         Start-Process "explorer.exe" -ArgumentList ('"' + $ccExe + '"')
+    }
+}
+
+if (Test-Path $mcExe) {
+    if ((Test-Path $dstBridgeCfg) -and -not (Test-Path $bakBridgeCfg)) {
+        $existingMcCfgText = Get-Content $dstBridgeCfg -Raw -ErrorAction SilentlyContinue
+        if ($existingMcCfgText -and ($existingMcCfgText -notmatch "MessageCenterBridge")) {
+            Copy-Item $dstBridgeCfg $bakBridgeCfg -Force
+            Write-Host "已备份通知中心原始配置到: $bakBridgeCfg" -ForegroundColor Green
+        }
+    }
+
+    $bridgeCopied = $false
+    for ($attempt = 1; $attempt -le 3; $attempt++) {
+        $mcProcs = Get-Process -Name "MessageCenterUI" -ErrorAction SilentlyContinue
+        if ($mcProcs) {
+            Write-Host "正在停止 MessageCenterUI.exe 以部署通知桥接模块..." -ForegroundColor Cyan
+            foreach ($p in $mcProcs) {
+                try {
+                    Stop-Process -Id $p.Id -Force -ErrorAction SilentlyContinue
+                    $null = $p.WaitForExit(3000)
+                } catch {}
+            }
+        }
+
+        try {
+            Copy-Item $srcBridgeDll $dstBridgeDll -Force
+
+            $mcBaseXmlText = if (Test-Path $bakBridgeCfg) {
+                Get-Content $bakBridgeCfg -Raw -Encoding UTF8
+            } elseif (Test-Path $dstBridgeCfg) {
+                Get-Content $dstBridgeCfg -Raw -Encoding UTF8
+            } else {
+                '<?xml version="1.0" encoding="utf-8"?><configuration><startup><supportedRuntime version="v4.0" sku=".NETFramework,Version=v4.8" /></startup><runtime /></configuration>'
+            }
+
+            [xml]$mcXml = $mcBaseXmlText
+            $confNode = $mcXml.SelectSingleNode("/configuration")
+            if ($null -eq $confNode) {
+                throw "无法解析 MessageCenterUI.exe.config XML 根节点"
+            }
+
+            $runtimeNode = $confNode.SelectSingleNode("runtime")
+            if ($null -eq $runtimeNode) {
+                $runtimeNode = $mcXml.CreateElement("runtime")
+                [void]$confNode.AppendChild($runtimeNode)
+            }
+
+            foreach ($oldNode in @($runtimeNode.SelectNodes("appDomainManagerAssembly | appDomainManagerType"))) {
+                [void]$runtimeNode.RemoveChild($oldNode)
+            }
+
+            $admAsm = $mcXml.CreateElement("appDomainManagerAssembly")
+            $admAsm.SetAttribute("value", "MessageCenterBridge, Version=1.0.0.0, Culture=neutral, PublicKeyToken=null")
+            [void]$runtimeNode.PrependChild($admAsm)
+
+            $admType = $mcXml.CreateElement("appDomainManagerType")
+            $admType.SetAttribute("value", "MessageCenterBridge.MessageCenterDomainManager")
+            [void]$runtimeNode.PrependChild($admType)
+
+            $mcUtf8 = New-Object System.Text.UTF8Encoding($false)
+            [System.IO.File]::WriteAllText($dstBridgeCfg, $mcXml.OuterXml, $mcUtf8)
+            $bridgeCopied = $true
+            break
+        } catch {
+            if ($attempt -eq 3) { throw }
+            Start-Sleep -Milliseconds 300
+        }
+    }
+
+    if ($bridgeCopied) {
+        Unblock-File -Path $dstBridgeDll, $dstBridgeCfg -ErrorAction SilentlyContinue
+        Start-Sleep -Milliseconds 150
+        $mcCfgWriteUtc = [DateTime]::UtcNow
+        (Get-Item $dstBridgeCfg).LastWriteTimeUtc = $mcCfgWriteUtc
+        Write-Host "已部署通知中心桥接模块: $dstBridgeDll" -ForegroundColor Green
+    }
+
+    $mcCfgWriteUtc = (Get-Item $dstBridgeCfg).LastWriteTimeUtc
+    $staleMcProcs = @(Get-Process -Name "MessageCenterUI" -ErrorAction SilentlyContinue | Where-Object {
+        try { $_.StartTime.ToUniversalTime() -lt $mcCfgWriteUtc } catch { $true }
+    })
+    if ($staleMcProcs.Count -gt 0) {
+        foreach ($p in $staleMcProcs) {
+            try {
+                Stop-Process -Id $p.Id -Force -ErrorAction SilentlyContinue
+                $null = $p.WaitForExit(3000)
+            } catch {}
+        }
     }
 }
 

@@ -129,10 +129,10 @@ namespace TopBarAdaptiveColor
                 Id = ToolboxModuleIds.NotificationAlertAnimation,
                 Category = ToolboxCategory.StatusBarEnhancements,
                 ControlKind = ToolboxControlKind.Toggle,
-                TitleZh = "未读通知变色与震动提醒",
-                TitleEn = "Highlight & shake Notification button (~2s) on unread alerts",
-                DescriptionZh = "仅当通知中心确有未读消息时，通知按钮切换橙色高亮并约每 2 秒轻抖一次；微信等顶栏应用图标闪烁时则仅在对应应用图标上每 2 秒轻抖提示",
-                DescriptionEn = "Apply a distinct highlight color and ~2s shake on NotificationButton only when MessageCenter actually has unread notices, and ~2s shake on flashing top bar app icons themselves",
+                TitleZh = "微信等应用未读消息收纳至通知中心与红标震动提醒",
+                TitleEn = "Bridge unread chat app alerts to Notification Center with red bell & shake",
+                DescriptionZh = "将微信、飞书、钉钉、QQ 等顶栏未读消息同步生成卡片收纳到右上角通知中心，通知按钮高亮红色 (#ED3D37) 并约每 2 秒震动提醒；点卡可跳转原窗口",
+                DescriptionEn = "Mirror flashing top-bar app alerts (WeChat, Feishu, DingTalk, QQ) into Notification Center cards, highlight the bell button red (#ED3D37) with a ~2s shake, and focus the app window on click",
                 DefaultEnabled = true
             },
             new()
@@ -366,6 +366,32 @@ if (Test-Path $bakBoostCfg) {
 }
 Remove-Item $dstBoostDll -Force
 Remove-Item (Join-Path $env:TEMP 'MagicTaskbar\control-center-boost.log') -Force
+$mcDir = 'C:\Program Files\HONOR\PCManager'
+$dstBridgeDll = Join-Path $mcDir 'MessageCenterBridge.dll'
+$dstBridgeCfg = Join-Path $mcDir 'MessageCenterUI.exe.config'
+$bakBridgeCfg = Join-Path $mcDir 'MessageCenterUI.exe.config.bak'
+Get-Process -Name 'MessageCenterUI' | Stop-Process -Force
+Start-Sleep -Seconds 1
+if (Test-Path $bakBridgeCfg) {
+    Copy-Item $bakBridgeCfg $dstBridgeCfg -Force
+    Remove-Item $bakBridgeCfg -Force
+} elseif (Test-Path $dstBridgeCfg) {
+    try {
+        [xml]$mcXml = Get-Content $dstBridgeCfg -Raw -Encoding UTF8
+        $runtimeNode = $mcXml.SelectSingleNode('/configuration/runtime')
+        if ($null -ne $runtimeNode) {
+            foreach ($oldNode in @($runtimeNode.SelectNodes('appDomainManagerAssembly | appDomainManagerType'))) {
+                [void]$runtimeNode.RemoveChild($oldNode)
+            }
+            [System.IO.File]::WriteAllText($dstBridgeCfg, $mcXml.OuterXml, (New-Object System.Text.UTF8Encoding($false)))
+        }
+    } catch {}
+}
+Remove-Item $dstBridgeDll -Force
+Remove-Item (Join-Path $env:TEMP 'MagicTaskbar\bridged-notifications.json') -Force
+Remove-Item (Join-Path $env:TEMP 'MagicTaskbar\bridged-notifications-ack.json') -Force
+Remove-Item (Join-Path $env:TEMP 'MagicTaskbar\message-center-bridge.log') -Force
+Remove-Item (Join-Path $env:TEMP 'MagicTaskbar\bridged-icons') -Recurse -Force
 $tpReg = 'HKCU:\SOFTWARE\PCManager\TouchPadSetting'
 if (Test-Path $tpReg) {
     Set-ItemProperty -Path $tpReg -Name 'TripleFingerLightTouch' -Value 1 -Type DWord

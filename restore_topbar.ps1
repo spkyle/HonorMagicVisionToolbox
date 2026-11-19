@@ -113,6 +113,49 @@ if (Test-Path $boostLog) {
     Remove-Item $boostLog -Force -ErrorAction SilentlyContinue
 }
 
+$mcDir = "C:\Program Files\HONOR\PCManager"
+$dstBridgeDll = Join-Path $mcDir "MessageCenterBridge.dll"
+$dstBridgeCfg = Join-Path $mcDir "MessageCenterUI.exe.config"
+$bakBridgeCfg = Join-Path $mcDir "MessageCenterUI.exe.config.bak"
+
+$mcProcs = Get-Process -Name "MessageCenterUI" -ErrorAction SilentlyContinue
+if ($mcProcs) {
+    $mcProcs | Stop-Process -Force -ErrorAction SilentlyContinue
+    Start-Sleep -Seconds 1
+}
+
+if (Test-Path $bakBridgeCfg) {
+    Copy-Item $bakBridgeCfg $dstBridgeCfg -Force
+    Remove-Item $bakBridgeCfg -Force -ErrorAction SilentlyContinue
+    Write-Host "已还原 MessageCenterUI.exe.config" -ForegroundColor Green
+} elseif (Test-Path $dstBridgeCfg) {
+    try {
+        [xml]$mcXml = Get-Content $dstBridgeCfg -Raw -Encoding UTF8
+        $runtimeNode = $mcXml.SelectSingleNode("/configuration/runtime")
+        if ($null -ne $runtimeNode) {
+            foreach ($oldNode in @($runtimeNode.SelectNodes("appDomainManagerAssembly | appDomainManagerType"))) {
+                [void]$runtimeNode.RemoveChild($oldNode)
+            }
+            [System.IO.File]::WriteAllText($dstBridgeCfg, $mcXml.OuterXml, (New-Object System.Text.UTF8Encoding($false)))
+        }
+    } catch {}
+}
+
+if (Test-Path $dstBridgeDll) {
+    Remove-Item $dstBridgeDll -Force -ErrorAction SilentlyContinue
+}
+
+foreach ($bridgeFile in @("bridged-notifications.json", "bridged-notifications-ack.json", "message-center-bridge.log")) {
+    $p = Join-Path $env:TEMP ("MagicTaskbar\" + $bridgeFile)
+    if (Test-Path $p) {
+        Remove-Item $p -Force -ErrorAction SilentlyContinue
+    }
+}
+$bridgedIconsDir = Join-Path $env:TEMP "MagicTaskbar\bridged-icons"
+if (Test-Path $bridgedIconsDir) {
+    Remove-Item $bridgedIconsDir -Recurse -Force -ErrorAction SilentlyContinue
+}
+
 $tpReg = "HKCU:\SOFTWARE\PCManager\TouchPadSetting"
 if (Test-Path $tpReg) {
     Set-ItemProperty -Path $tpReg -Name "TripleFingerLightTouch" -Value 1 -Type DWord -ErrorAction SilentlyContinue

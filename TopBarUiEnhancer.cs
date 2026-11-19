@@ -51,13 +51,14 @@ namespace TopBarAdaptiveColor
         private readonly DependencyPropertyDescriptor? _notifSourceDescriptor;
         private readonly DependencyPropertyDescriptor? _notifBgDescriptor;
         private readonly DispatcherTimer? _notifAlertTimer;
-        private readonly Dictionary<object, RotateTransform> _appShakeRotates = new();
         private RotateTransform? _notifShakeRotate;
         private bool _notifAlertActive;
         private bool _isUpdatingNotifVisual;
+        private bool _weForcedHonorNotificationDot;
+        private bool _isUpdatingStatusIcons;
         private long _lastNotifShakeTick;
-        private long _lastAppShakeTick;
-        private const string NotificationAlertHex = "#FF6A2B";
+        private const string NotificationAlertHex = "#ED3D37";
+        private static readonly Color NotificationAlertPillColor = Color.FromArgb(0x45, 0xED, 0x3D, 0x37);
         private readonly ClickMode _origControlCenterClickMode = ClickMode.Release;
         private readonly ClickMode _origNotificationClickMode = ClickMode.Release;
         private readonly RoutedEventHandler? _origControlCenterClickHandler;
@@ -75,6 +76,7 @@ namespace TopBarAdaptiveColor
         private readonly MethodInfo? _openMessageCenterMethod;
         private readonly MethodInfo? _trackerStartMethod;
         private readonly StatusNotificationTrayRelay _trayRelay;
+        private readonly StatusNotificationBridgeCoordinator _bridgeCoordinator;
 
         private Visibility _lastHonorYoyoVisibility = Visibility.Visible;
         private bool _isSettingYoyoVisibility;
@@ -212,8 +214,12 @@ namespace TopBarAdaptiveColor
 
             ApplyYoyoVisibility();
             ApplyControlCenterClickMode();
-            RefreshNotificationAlertVisual(allowImmediateShake: false);
             _trayRelay = new StatusNotificationTrayRelay(topBarWindow);
+            _bridgeCoordinator = new StatusNotificationBridgeCoordinator(
+                topBarWindow,
+                _statusItemsControl,
+                () => RefreshNotificationAlertVisual(allowImmediateShake: true));
+            RefreshNotificationAlertVisual(allowImmediateShake: false);
 
             DiagnosticLog.Info(
                 $"TopBarUiEnhancer attached (yoyoFound={_yoyoButton != null}, controlCenterFound={_controlCenterButton != null}, " +
@@ -434,13 +440,9 @@ namespace TopBarAdaptiveColor
                     _trackerStartMethod.Invoke(tracker, null);
                 }
 
-                if (clearNotificationBadge && _updateStatusIconsMethod != null)
+                if (clearNotificationBadge)
                 {
-                    ParameterInfo[] ups = _updateStatusIconsMethod.GetParameters();
-                    object?[] uargs = ups.Length == 0
-                        ? Array.Empty<object?>()
-                        : new object?[] { ups[0].IsOptional && ups[0].HasDefaultValue ? ups[0].DefaultValue : null };
-                    _updateStatusIconsMethod.Invoke(_window, uargs);
+                    InvokeUpdateStatusIcons();
                 }
             }
             catch (Exception ex)
@@ -594,9 +596,13 @@ namespace TopBarAdaptiveColor
                 return;
             }
 
+            _bridgeCoordinator.AcknowledgeBellForActiveEpisodes();
+            _weForcedHonorNotificationDot = false;
+
             if (!AdaptiveSettingsStore.IsFastNotificationResponseEnabled)
             {
                 _origNotificationClickHandler?.Invoke(sender, e);
+                RefreshNotificationAlertVisual(allowImmediateShake: false);
                 return;
             }
 
@@ -880,6 +886,7 @@ namespace TopBarAdaptiveColor
             }
 
             _disposed = true;
+            _bridgeCoordinator.Dispose();
             _trayRelay.Dispose();
             _notifAlertTimer?.Stop();
             AdaptiveSettingsStore.YoyoClawChanged -= OnYoyoClawSettingChanged;
@@ -961,6 +968,32 @@ namespace TopBarAdaptiveColor
             }
         }
 
+        private void InvokeUpdateStatusIcons()
+        {
+            if (_updateStatusIconsMethod == null)
+            {
+                return;
+            }
+
+            _isUpdatingStatusIcons = true;
+            try
+            {
+                ParameterInfo[] ups = _updateStatusIconsMethod.GetParameters();
+                object?[] uargs = ups.Length == 0
+                    ? Array.Empty<object?>()
+                    : new object?[] { ups[0].IsOptional && ups[0].HasDefaultValue ? ups[0].DefaultValue : null };
+                _updateStatusIconsMethod.Invoke(_window, uargs);
+            }
+            catch (Exception ex)
+            {
+                DiagnosticLog.Warn($"UpdateStatusIcons invoke failed: {ex.Message}");
+            }
+            finally
+            {
+                _isUpdatingStatusIcons = false;
+            }
+        }
+
         private void OnNotificationAlertSettingChanged(bool _)
         {
             if (_disposed || _window.Dispatcher.HasShutdownStarted)
@@ -970,13 +1003,14 @@ namespace TopBarAdaptiveColor
 
             _window.Dispatcher.BeginInvoke(DispatcherPriority.Normal, new Action(() =>
             {
+                _bridgeCoordinator.Sync(notifyOnChange: false);
                 RefreshNotificationAlertVisual(allowImmediateShake: true);
             }));
         }
 
         private void OnNotificationIconSourceChanged(object? sender, EventArgs e)
         {
-            if (_disposed)
+            if (_disposed || _isUpdatingStatusIcons)
             {
                 return;
             }
@@ -1002,13 +1036,12 @@ namespace TopBarAdaptiveColor
             }
 
             long now = Environment.TickCount64;
+            _bridgeCoordinator.Sync(notifyOnChange: false);
             RefreshNotificationAlertVisual(allowImmediateShake: false);
             if (_notifAlertActive && now - _lastNotifShakeTick >= 1950)
             {
                 TriggerNotificationShake(now);
             }
-
-            RefreshUnreadAppShakeVisuals(now);
         }
 
         internal bool RefreshNotificationAlertVisual(bool allowImmediateShake)
@@ -1018,9 +1051,29 @@ namespace TopBarAdaptiveColor
                 return false;
             }
 
+            bool featureEnabled = AdaptiveSettingsStore.IsNotificationAlertAnimationEnabled;
+            bool bridgeAlert = featureEnabled && _bridgeCoordinator.HasUnackedBellAlert;
             bool sysUnread = _hasNotificationField?.GetValue(_window) is true;
-            bool shouldAlert = AdaptiveSettingsStore.IsNotificationAlertAnimationEnabled && sysUnread;
 
+            if (bridgeAlert && !sysUnread && _hasNotificationField != null)
+            {
+                _hasNotificationField.SetValue(_window, true);
+                _weForcedHonorNotificationDot = true;
+                InvokeUpdateStatusIcons();
+                sysUnread = true;
+            }
+            else if (!bridgeAlert && _weForcedHonorNotificationDot)
+            {
+                _weForcedHonorNotificationDot = false;
+                if (sysUnread && _hasNotificationField != null)
+                {
+                    _hasNotificationField.SetValue(_window, false);
+                    InvokeUpdateStatusIcons();
+                    sysUnread = false;
+                }
+            }
+
+            bool shouldAlert = featureEnabled && (sysUnread || bridgeAlert);
             if (!shouldAlert)
             {
                 ClearNotificationAlertVisual();
@@ -1051,10 +1104,10 @@ namespace TopBarAdaptiveColor
                 return;
             }
 
-            Brush desired = new SolidColorBrush(Color.FromArgb(0x3D, 0xFF, 0x6A, 0x2B));
+            Brush desired = new SolidColorBrush(NotificationAlertPillColor);
             desired.Freeze();
             if (_notificationButton.Background is SolidColorBrush cur &&
-                cur.Color == Color.FromArgb(0x3D, 0xFF, 0x6A, 0x2B))
+                cur.Color == NotificationAlertPillColor)
             {
                 return;
             }
@@ -1080,8 +1133,6 @@ namespace TopBarAdaptiveColor
                 _notifShakeRotate.BeginAnimation(RotateTransform.AngleProperty, null);
                 _notifShakeRotate.Angle = 0.0;
             }
-
-            ClearUnreadAppShakeVisuals();
 
             if (wasActive && _notificationIcon != null)
             {
@@ -1113,96 +1164,6 @@ namespace TopBarAdaptiveColor
 
             _notifShakeRotate ??= AttachShakeTransform(target);
             StartShakeKeyFrames(_notifShakeRotate);
-        }
-
-        private void RefreshUnreadAppShakeVisuals(long nowTick)
-        {
-            if (!AdaptiveSettingsStore.IsNotificationAlertAnimationEnabled || _statusItemsControl == null)
-            {
-                ClearUnreadAppShakeVisuals();
-                return;
-            }
-
-            var activeItems = new HashSet<object>();
-            bool dueForShake = nowTick - _lastAppShakeTick >= 1950;
-            bool shookAny = false;
-
-            foreach (object? item in _statusItemsControl.Items)
-            {
-                if (item == null)
-                {
-                    continue;
-                }
-
-                bool hasUnread = item.GetType().GetProperty("HasUnread", BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic)?.GetValue(item) is true;
-                if (!hasUnread)
-                {
-                    continue;
-                }
-
-                activeItems.Add(item);
-                if (_statusItemsControl.ItemContainerGenerator.ContainerFromItem(item) is not UIElement container)
-                {
-                    continue;
-                }
-
-                bool isNew = false;
-                if (!_appShakeRotates.TryGetValue(item, out RotateTransform? rt))
-                {
-                    rt = AttachShakeTransform(container);
-                    _appShakeRotates[item] = rt;
-                    isNew = true;
-                }
-
-                if (isNew || dueForShake)
-                {
-                    StartShakeKeyFrames(rt);
-                    shookAny = true;
-                }
-            }
-
-            if (shookAny)
-            {
-                _lastAppShakeTick = nowTick;
-            }
-
-            if (_appShakeRotates.Count > 0)
-            {
-                List<object>? stale = null;
-                foreach (KeyValuePair<object, RotateTransform> kv in _appShakeRotates)
-                {
-                    if (!activeItems.Contains(kv.Key))
-                    {
-                        kv.Value.BeginAnimation(RotateTransform.AngleProperty, null);
-                        kv.Value.Angle = 0.0;
-                        stale ??= new List<object>();
-                        stale.Add(kv.Key);
-                    }
-                }
-
-                if (stale != null)
-                {
-                    foreach (object key in stale)
-                    {
-                        _appShakeRotates.Remove(key);
-                    }
-                }
-            }
-        }
-
-        private void ClearUnreadAppShakeVisuals()
-        {
-            if (_appShakeRotates.Count == 0)
-            {
-                return;
-            }
-
-            foreach (RotateTransform rt in _appShakeRotates.Values)
-            {
-                rt.BeginAnimation(RotateTransform.AngleProperty, null);
-                rt.Angle = 0.0;
-            }
-            _appShakeRotates.Clear();
         }
 
         private static RotateTransform AttachShakeTransform(UIElement target)

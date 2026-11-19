@@ -13,8 +13,10 @@
   <ItemGroup>
     <Compile Remove="ControlCenterSpeedBoost\**" />
     <None Remove="ControlCenterSpeedBoost\**" />
+    <Compile Remove="MessageCenterBridge\**" />
+    <None Remove="MessageCenterBridge\**" />
   </ItemGroup>
-  <Target Name="BuildControlCenterSpeedBoost" AfterTargets="Build" Inputs="ControlCenterSpeedBoost\ControlCenterSpeedBoost.cs;ControlCenterSpeedBoost\ControlCenterTrayUI.exe.config" Outputs="$(TargetDir)ControlCenterSpeedBoost.dll;$(TargetDir)ControlCenterTrayUI.exe.config">
+  <Target Name="BuildControlCenterSpeedBoost" AfterTargets="Build" Inputs="ControlCenterSpeedBoost\ControlCenterSpeedBoost.cs;ControlCenterSpeedBoost\ControlCenterTrayUI.exe.config;MessageCenterBridge\MessageCenterBridge.cs" Outputs="$(TargetDir)ControlCenterSpeedBoost.dll;$(TargetDir)ControlCenterTrayUI.exe.config;$(TargetDir)MessageCenterBridge.dll">
     <PropertyGroup>
       <Net4Csc>$(WINDIR)\Microsoft.NET\Framework64\v4.0.30319\csc.exe</Net4Csc>
       <Net4WpfDir>$(WINDIR)\Microsoft.NET\Framework64\v4.0.30319\WPF</Net4WpfDir>
@@ -22,5 +24,6 @@
     </PropertyGroup>
     <Exec Command="&quot;$(Net4Csc)&quot; /nologo /target:library /platform:x64 /optimize+ &quot;/out:$(TargetDir)ControlCenterSpeedBoost.dll&quot; &quot;/r:$(Net4WpfDir)\PresentationFramework.dll&quot; &quot;/r:$(Net4WpfDir)\PresentationCore.dll&quot; &quot;/r:$(Net4WpfDir)\WindowsBase.dll&quot; &quot;/r:$(Net4FxDir)\System.Xaml.dll&quot; &quot;ControlCenterSpeedBoost\ControlCenterSpeedBoost.cs&quot;" />
     <Copy SourceFiles="ControlCenterSpeedBoost\ControlCenterTrayUI.exe.config" DestinationFiles="$(TargetDir)ControlCenterTrayUI.exe.config" SkipUnchangedFiles="true" />
+    <Exec Command="&quot;$(Net4Csc)&quot; /nologo /target:library /platform:x64 /optimize+ &quot;/out:$(TargetDir)MessageCenterBridge.dll&quot; &quot;/r:$(Net4WpfDir)\PresentationFramework.dll&quot; &quot;/r:$(Net4WpfDir)\PresentationCore.dll&quot; &quot;/r:$(Net4WpfDir)\WindowsBase.dll&quot; &quot;/r:$(Net4FxDir)\System.Xaml.dll&quot; &quot;/r:$(Net4FxDir)\System.Runtime.Serialization.dll&quot; &quot;/r:$(Net4FxDir)\System.Xml.dll&quot; &quot;MessageCenterBridge\MessageCenterBridge.cs&quot;" />
   </Target>
 </Project>
