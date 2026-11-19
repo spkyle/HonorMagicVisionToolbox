@@ -38,6 +38,7 @@ namespace TopBarAdaptiveColor
         public const string FastSettingsResponse = "fast_settings_response";
         public const string FastNotificationResponse = "fast_notification_response";
         public const string TouchpadThreeFingerSearch = "touchpad_three_finger_search";
+        public const string ActionOpenGitHub = "action_open_github";
         public const string ActionOpenLogs = "action_open_logs";
         public const string ActionResetDefaults = "action_reset_defaults";
         public const string ActionUninstall = "action_uninstall";
@@ -68,31 +69,33 @@ namespace TopBarAdaptiveColor
 
     internal static class ToolboxModuleRegistry
     {
+        public const string GitHubRepoUrl = "https://github.com/spkyle/HonorMagicVisionToolbox";
+
         public static readonly IReadOnlyList<ToolboxCategoryMeta> Categories = new ToolboxCategoryMeta[]
         {
             new()
             {
                 Category = ToolboxCategory.StatusBarEnhancements,
-                TitleZh = "状态栏增强",
-                TitleEn = "Status Bar Enhancements"
+                TitleZh = "一、顶部状态栏增强",
+                TitleEn = "Top Status Bar Enhancements"
             },
             new()
             {
                 Category = ToolboxCategory.DockEnhancements,
-                TitleZh = "底部任务栏多任务增强",
+                TitleZh = "二、底部 Dock 多任务增强",
                 TitleEn = "Taskbar & Multitasking"
             },
             new()
             {
                 Category = ToolboxCategory.BugFixes,
-                TitleZh = "问题修复与优化",
+                TitleZh = "三、问题修复与体验优化",
                 TitleEn = "Fixes & Optimizations"
             },
             new()
             {
                 Category = ToolboxCategory.Maintenance,
-                TitleZh = "工具与维护",
-                TitleEn = "Tools & Maintenance"
+                TitleZh = "四、项目主页与维护工具",
+                TitleEn = "Project & Maintenance"
             }
         };
 
@@ -103,9 +106,9 @@ namespace TopBarAdaptiveColor
                 Id = ToolboxModuleIds.AdaptiveTopBarColor,
                 Category = ToolboxCategory.StatusBarEnhancements,
                 ControlKind = ToolboxControlKind.Toggle,
-                TitleZh = "全屏时状态栏自适应颜色",
+                TitleZh = "全屏 / 最大化时状态栏自适应颜色",
                 TitleEn = "Adaptive top bar color for maximized windows",
-                DescriptionZh = "固定模式下窗口最大化后，自动匹配窗口顶部颜色并自适应深浅文字与图标",
+                DescriptionZh = "解决最大化后顶部始终存在透明桌面条的问题，自动匹配当前窗口标题栏颜色并自适应深浅文字与图标",
                 DescriptionEn = "Match maximized window header color and adapt light/dark foreground in fixed mode",
                 DefaultEnabled = true
             },
@@ -114,21 +117,10 @@ namespace TopBarAdaptiveColor
                 Id = ToolboxModuleIds.ShowYoyoClawButton,
                 Category = ToolboxCategory.StatusBarEnhancements,
                 ControlKind = ToolboxControlKind.Toggle,
-                TitleZh = "显示右侧 YOYO Claw 按钮",
-                TitleEn = "Show YOYO Claw button on top bar",
-                DescriptionZh = "控制状态栏右侧控制中心旁的 YOYO Claw 快捷图标显示，关闭后将其隐藏",
+                TitleZh = "显示 / 隐藏右侧 YOYO Claw 按钮",
+                TitleEn = "Show / hide YOYO Claw button on top bar",
+                DescriptionZh = "控制状态栏右侧控制中心旁默认无法关闭的 YOYO Claw 按钮显示，关闭后立即隐藏",
                 DescriptionEn = "Show or hide the YOYO Claw button beside Control Center on the top bar",
-                DefaultEnabled = true
-            },
-            new()
-            {
-                Id = ToolboxModuleIds.NativeTrayRightClick,
-                Category = ToolboxCategory.StatusBarEnhancements,
-                ControlKind = ToolboxControlKind.Toggle,
-                TitleZh = "状态栏通知图标右键联动原生菜单",
-                TitleEn = "Forward right-click on top bar app icons to native tray menu",
-                DescriptionZh = "右键顶部微信、飞书等固定通知图标时自动触发原程序的系统托盘右键菜单（按住 Shift 右键或未找到时仍显示「从顶部栏移除」）",
-                DescriptionEn = "Relay right-clicks on fixed app notification icons to their Windows tray menu (hold Shift+RightClick for Remove from Top Bar)",
                 DefaultEnabled = true
             },
             new()
@@ -136,10 +128,21 @@ namespace TopBarAdaptiveColor
                 Id = ToolboxModuleIds.HiddenTrayIconPinning,
                 Category = ToolboxCategory.StatusBarEnhancements,
                 ControlKind = ToolboxControlKind.Toggle,
-                TitleZh = "支持拖拽任意隐藏托盘图标固定到顶部栏",
+                TitleZh = "支持拖拽任意系统隐藏托盘图标固定到顶部栏",
                 TitleEn = "Drag any hidden tray icon to pin on top bar",
-                DescriptionZh = "点击顶部 ^ 展开隐藏托盘后，可将任意应用图标直接拖放到顶部状态栏固定显示；支持直接把顶栏图标拖回 ^ 箭头上（或向下拖出）收起，以及重启恢复与原生右键菜单",
+                DescriptionZh = "突破原版仅支持飞书、钉钉、微信等少数应用的限制，展开 ^ 托盘后任意程序拖到顶栏即可固定，也可直接拖回 ^ 箭头上收起",
                 DescriptionEn = "Drag any icon from the overflow tray onto the top bar to pin it; drag bar icons directly onto the ^ arrow (or downward) to hide back into overflow",
+                DefaultEnabled = true
+            },
+            new()
+            {
+                Id = ToolboxModuleIds.NativeTrayRightClick,
+                Category = ToolboxCategory.StatusBarEnhancements,
+                ControlKind = ToolboxControlKind.Toggle,
+                TitleZh = "顶部栏通知图标右键弹出程序原生菜单",
+                TitleEn = "Forward right-click on top bar app icons to native tray menu",
+                DescriptionZh = "解决原版固定图标右键只有「从顶部栏移除」的问题，开启后可直接原地弹出对应程序的系统托盘原生功能菜单（按住 Shift + 右键仍可移除）",
+                DescriptionEn = "Relay right-clicks on fixed app notification icons to their Windows tray menu (hold Shift+RightClick for Remove from Top Bar)",
                 DefaultEnabled = true
             },
             new()
@@ -147,9 +150,9 @@ namespace TopBarAdaptiveColor
                 Id = ToolboxModuleIds.TopBarMaximizedWindowDrag,
                 Category = ToolboxCategory.StatusBarEnhancements,
                 ControlKind = ToolboxControlKind.Toggle,
-                TitleZh = "顶栏空白处拖拽与双击控制最大化窗口",
+                TitleZh = "顶栏空白处拖拽 & 双击控制已最大化窗口",
                 TitleEn = "Drag or double-click blank top bar to restore & move maximized window",
-                DescriptionZh = "在顶部状态栏空白区域按住左键向任意方向拖拽超过 6px，自动还原当前最大化窗口并跟手移动；双击空白处可直接还原（再双击可重新最大化）",
+                DescriptionZh = "配合自适应状态栏，在顶部空白处按住向任意方向拖过阈值即可还原并跟手移动（无需再去下面找程序标题栏），双击空白处可直接还原或最大化",
                 DescriptionEn = "Hold left-click in the blank top bar strip and drag >6px in any direction to restore and drag the maximized window, or double-click to toggle restore",
                 DefaultEnabled = true
             },
@@ -158,9 +161,9 @@ namespace TopBarAdaptiveColor
                 Id = ToolboxModuleIds.DockPreviewKeepOpenOnClose,
                 Category = ToolboxCategory.DockEnhancements,
                 ControlKind = ToolboxControlKind.Toggle,
-                TitleZh = "中键关闭单窗口后保持多窗口缩略图展开",
+                TitleZh = "中键 / 点 × 关闭单窗口后保持多窗口缩略图展开",
                 TitleEn = "Keep thumbnail strip open after middle-closing one window",
-                DescriptionZh = "在底部 Dock 多窗口预览中按鼠标中键或点 × 关闭某个窗口后，立即移除该卡片并保持其余窗口缩略图展开，方便连续关闭",
+                DescriptionZh = "解决关闭一个窗口就把整个预览堆叠全部关掉的问题，自动移除已关闭卡片并保持其余缩略图展开，方便连续关闭多个堆叠窗口",
                 DescriptionEn = "Remove only the closed window card on middle-click/close and keep remaining stacked thumbnails open",
                 DefaultEnabled = true
             },
@@ -169,9 +172,9 @@ namespace TopBarAdaptiveColor
                 Id = ToolboxModuleIds.DockPreviewAeroPeek,
                 Category = ToolboxCategory.DockEnhancements,
                 ControlKind = ToolboxControlKind.Toggle,
-                TitleZh = "悬停缩略图卡片时桌面实时预览 (Aero Peek)",
+                TitleZh = "对齐 Windows 二级预览：悬停缩略图卡片时桌面实时预览 (Aero Peek)",
                 TitleEn = "Live desktop Aero Peek when hovering thumbnail cards",
-                DescriptionZh = "鼠标悬停底部多窗口缩略图卡片时，在桌面临时完整展示对应窗口原画面（含最小化窗口），移开自动还原",
+                DescriptionZh = "补充原版缺少的二级预览能力，悬停卡片时还原并高亮指定窗口（清晰区分多个 cmd 等同类窗口），鼠标移开自动收回",
                 DescriptionEn = "Preview the hovered window full-size on the desktop while keeping thumbnails on top; restore on leave",
                 DefaultEnabled = true
             },
@@ -180,9 +183,9 @@ namespace TopBarAdaptiveColor
                 Id = ToolboxModuleIds.DockPreviewTransferCorridor,
                 Category = ToolboxCategory.DockEnhancements,
                 ControlKind = ToolboxControlKind.Toggle,
-                TitleZh = "底部 Dock 多窗口预览斜向防误关走廊",
+                TitleZh = "Dock 多窗口预览斜向防误关走廊",
                 TitleEn = "Protect Dock multi-window preview when moving diagonally across divider or icons",
-                DescriptionZh = "鼠标从底部 Dock 图标斜向滑向缩略图卡片时，经过分割线 | 或短暂擦碰相邻图标不会立即误关或切走预览",
+                DescriptionZh = "优化鼠标从底部 Dock 滑动切换多任务时的范围判定，斜向移向缩略图经过分隔线或擦碰相邻图标时不再突然收起预览",
                 DescriptionEn = "Prevent accidental preview dismissal or premature switching when crossing the separator or brushing adjacent Dock icons toward preview cards",
                 DefaultEnabled = true
             },
@@ -191,9 +194,9 @@ namespace TopBarAdaptiveColor
                 Id = ToolboxModuleIds.TopBarPopupEdgeClamp,
                 Category = ToolboxCategory.BugFixes,
                 ControlKind = ToolboxControlKind.Toggle,
-                TitleZh = "修复状态栏靠右弹窗超出屏幕被裁切",
+                TitleZh = "修复右侧控制中心 / 电池 / 音量弹窗超出屏幕被裁切",
                 TitleEn = "Clamp top bar popups inside monitor bounds",
-                DescriptionZh = "隐藏 YOYO Claw 等按钮后电池、音量、网络等弹窗右移时，自动限制其与亚克力背景层不超出屏幕右边缘",
+                DescriptionZh = "隐藏部分右侧按钮导致弹窗右移时，自动将其与亚克力背景层限制在当前显示器安全工作区内",
                 DescriptionEn = "Prevent battery/volume/network popups and acrylic backdrops from clipping past the screen edge",
                 DefaultEnabled = true
             },
@@ -202,10 +205,10 @@ namespace TopBarAdaptiveColor
                 Id = ToolboxModuleIds.AdaptiveTopBarGapFix,
                 Category = ToolboxCategory.BugFixes,
                 ControlKind = ToolboxControlKind.Toggle,
-                TitleZh = "修复最大化后状态栏下方细缝",
-                DescriptionZh = "工作区重算导致最大化窗口下移时，自动向下延展状态栏消除壁纸缝隙",
+                TitleZh = "修复窗口最大化后状态栏下方露出一线壁纸细缝",
+                DescriptionZh = "工作区重算导致最大化窗口下移产生细缝时，自动微调状态栏底部向下延展封住壁纸缝隙",
                 TitleEn = "Fix top bar bottom seam after maximizing",
-                DescriptionEn = "Extend top bar bottom edge by 1-3px when workspace reservation shifts windows down",
+                DescriptionEn = "Extend top bar bottom edge when workspace reservation shifts windows down",
                 DefaultEnabled = true
             },
             new()
@@ -213,9 +216,9 @@ namespace TopBarAdaptiveColor
                 Id = ToolboxModuleIds.FastSettingsResponse,
                 Category = ToolboxCategory.BugFixes,
                 ControlKind = ToolboxControlKind.Toggle,
-                TitleZh = "状态栏控制中心与设置点击响应加速",
+                TitleZh = "控制中心与设置点击响应速度优化",
                 TitleEn = "Boost Control Center & Settings click responsiveness",
-                DescriptionZh = "改为按下即触发、保持控制中心与设置页热驻留并异步延后重扫描，显著降低点击弹出延迟",
+                DescriptionZh = "按下即响应并维持热驻留与预热（除冷启动首次加载约 <3 秒外，日常打开几乎无感），并消除关闭闪烁",
                 DescriptionEn = "Trigger on press, keep Control Center & Settings warm in memory, and defer heavy pre-show scans",
                 DefaultEnabled = true
             },
@@ -224,9 +227,9 @@ namespace TopBarAdaptiveColor
                 Id = ToolboxModuleIds.FastNotificationResponse,
                 Category = ToolboxCategory.BugFixes,
                 ControlKind = ToolboxControlKind.Toggle,
-                TitleZh = "顶部通知按钮极速响应与假死自愈",
+                TitleZh = "顶部通知按钮弹出速度优化并修复假死",
                 TitleEn = "Boost top bar Notification button response & auto-recover",
-                DescriptionZh = "通知按钮按下即触发并直连唤醒已运行通知中心，若通知进程异常无响应则自动重建后打开",
+                DescriptionZh = "按下即直连唤醒已运行通知中心大幅提速，同时修复高频点击卡死与假死问题，异常时自动重建恢复",
                 DescriptionEn = "Trigger on press, wake existing MessageCenter directly without respawning, and auto-recover if stuck",
                 DefaultEnabled = true
             },
@@ -235,11 +238,24 @@ namespace TopBarAdaptiveColor
                 Id = ToolboxModuleIds.TouchpadThreeFingerSearch,
                 Category = ToolboxCategory.BugFixes,
                 ControlKind = ToolboxControlKind.Toggle,
-                TitleZh = "允许压力触控板三指轻触弹出智慧搜索",
+                TitleZh = "压力触控板三指轻触「智慧搜索」独立开关",
                 TitleEn = "Allow three-finger touchpad light touch to open AI Search",
-                DescriptionZh = "关闭后将单独禁用压力触控板三指轻触触发「智慧搜索」(TripleFingerLightTouch)，不影响三指拖拽或其他手势",
+                DescriptionZh = "关闭后可单独禁用移动办公时极易误触的三指轻触「智慧搜索」，完整保留三指拖拽与其余手势",
                 DescriptionEn = "Turn off to disable three-finger Force Touch opening HONOR AI Search while keeping all other gestures intact",
                 DefaultEnabled = true
+            },
+            new()
+            {
+                Id = ToolboxModuleIds.ActionOpenGitHub,
+                Category = ToolboxCategory.Maintenance,
+                ControlKind = ToolboxControlKind.Action,
+                TitleZh = "GitHub 开源仓库",
+                TitleEn = "GitHub Repository",
+                DescriptionZh = GitHubRepoUrl,
+                DescriptionEn = GitHubRepoUrl,
+                ActionTextZh = "打开仓库",
+                ActionTextEn = "Open Repo",
+                ActionHandler = OpenGitHubRepository
             },
             new()
             {
@@ -422,6 +438,22 @@ if ($SelfDelete -and (Test-Path $PSCommandPath)) { Remove-Item $PSCommandPath -F
             }
             catch
             {
+            }
+        }
+
+        private static void OpenGitHubRepository()
+        {
+            try
+            {
+                Process.Start(new ProcessStartInfo
+                {
+                    FileName = GitHubRepoUrl,
+                    UseShellExecute = true
+                });
+            }
+            catch (Exception ex)
+            {
+                DiagnosticLog.Warn($"OpenGitHubRepository failed: {ex.Message}");
             }
         }
 

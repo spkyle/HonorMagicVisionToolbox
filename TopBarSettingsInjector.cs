@@ -779,14 +779,30 @@ namespace TopBarAdaptiveColor
                 var pageSubtitle = new TextBlock
                 {
                     Text = isChinese
-                        ? "模块化增强与 Bug 修复开关，按功能分组管理并支持随时独立启用"
-                        : "Modular enhancements and bug fixes, managed independently per module",
+                        ? $"模块化增强与 Bug 修复开关 · 开源仓库：{ToolboxModuleRegistry.GitHubRepoUrl}"
+                        : $"Modular enhancements and bug fixes · GitHub: {ToolboxModuleRegistry.GitHubRepoUrl}",
                     FontFamily = baseFont,
                     FontSize = 12.0,
                     TextWrapping = TextWrapping.Wrap,
+                    Cursor = Cursors.Hand,
+                    ToolTip = ToolboxModuleRegistry.GitHubRepoUrl,
                     Margin = new Thickness(16.0, 0.0, 0.0, 14.0)
                 };
                 pageSubtitle.SetResourceReference(TextBlock.ForegroundProperty, "SettingsSecondaryTextBrush");
+                pageSubtitle.MouseLeftButtonUp += (_, _) =>
+                {
+                    try
+                    {
+                        System.Diagnostics.Process.Start(new System.Diagnostics.ProcessStartInfo
+                        {
+                            FileName = ToolboxModuleRegistry.GitHubRepoUrl,
+                            UseShellExecute = true
+                        });
+                    }
+                    catch
+                    {
+                    }
+                };
                 rootStack.Children.Add(pageSubtitle);
 
                 foreach (var cat in ToolboxModuleRegistry.Categories)

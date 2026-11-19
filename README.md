@@ -1,70 +1,65 @@
-# Magic 视界工具箱（HONOR Magic Vision TopBar & Dock Enhancements）
+# Magic 视界工具箱（Honor Magic Vision Toolbox）
 
-针对荣耀笔记本 **Magic 视界（HONOR MagicBook Art 14 / MagicTaskbar / ControlCenterTrayUI / ForcePad）** 的模块化运行时增强补丁包。
+针对荣耀笔记本 **Magic 视界（顶栏状态栏 / 底部 Dock / 控制中心 / 压力触控板）** 的零侵入运行时增强补丁包。
 
-> **零侵入设计**：不修改任何官方已签名二进制文件（`magictaskbar-ui.exe`、`MagicTaskbar.*.dll`、`ControlCenterTrayUI.exe` 签名均保持原样），仅通过 .NET 6 `STARTUP_HOOKS` 与 .NET Framework 4.8 `AppDomainManager` 在内存中按需挂载。所有功能均可在 **Magic 视界设置 →「Magic 视界工具箱」** 中独立实时开关，并支持在设置页内或脚本一键彻底卸载还原。
+📦 **GitHub 开源仓库**：https://github.com/spkyle/HonorMagicVisionToolbox  
+⬇️ **小白免编译下载**：https://github.com/spkyle/HonorMagicVisionToolbox/releases/latest
+
+> **零侵入设计**：不修改任何官方已签名二进制文件（`magictaskbar-ui.exe`、`MagicTaskbar.*.dll`、`ControlCenterTrayUI.exe` 签名均保持原样），仅通过 .NET 6 `STARTUP_HOOKS` 与 .NET Framework 4.8 `AppDomainManager` 在内存中按需挂载。所有功能均可在 **Magic 视界设置 →「Magic 视界工具箱」** 中独立实时开关，也支持在设置界面内一键卸载还原。
 
 ---
 
 ## 快速安装与卸载（零命令行）
 
 ### 一键安装
-1. 下载 [Releases](../../releases) 中的压缩包并解压（或克隆源码仓）。
-2. 双击 **`一键安装.bat`**（或在源码目录中运行）。
-3. 弹窗提示管理员权限（UAC）时点击 **“是”**，脚本会自动停止顶部栏/控制中心进程、部署模块并重启为正常用户权限。
+1. 下载 [Releases](https://github.com/spkyle/HonorMagicVisionToolbox/releases/latest) 中的压缩包并解压（或克隆本仓库）。
+2. 直接双击 **`一键安装.bat`**。
+3. 弹窗提示管理员权限（UAC）时点击 **“是”**，脚本会自动部署并重启顶部栏与控制中心进程。
 
-> 若压缩包内已包含预编译的 `bin/Release/net6.0-windows/` 产物，安装**无需**本机安装 .NET SDK；若从纯源码克隆，脚本会自动调用 `dotnet build -c Release`。
+> Release 压缩包内已附带预编译产物，**无需本机安装 .NET SDK**；若从纯源码克隆，脚本会自动调用 `dotnet build -c Release`。
 
-### 一键卸载（三种方式任选）
-- **设置界面内卸载**：打开 Magic 视界设置 → 左侧 **「Magic 视界工具箱」** → 最下方 **「卸载并还原」** 按钮 → 确认后授权 UAC，自动清理所有文件与配置并重启官方原版。
-- **双击卸载**：双击目录中的 **`一键卸载.bat`**。
-- **命令行还原**：管理员 PowerShell 运行 `restore_topbar.ps1`。
+### 一键卸载
+- **设置界面内卸载**：打开 Magic 视界设置 → **「Magic 视界工具箱」** → 拉到最底部点击 **「卸载并还原」** 按钮，确认后授权 UAC 即可自动彻底清理并重启官方原版。
+- **双击卸载**：双击目录中的 **`一键卸载.bat`**（或在管理员 PowerShell 运行 `restore_topbar.ps1`）。
 
 ---
 
 ## 功能总览与实现原理
 
-### 状态栏增强
-1. **全屏/最大化时状态栏自适应颜色**
-   通过 `EnumWindows` Z 序枚举与 `DWMWA_EXTENDED_FRAME_BOUNDS` 识别固定模式下真正覆盖工作区顶部的最大化窗口，结合 `BitBlt` 在接缝下方采样聚类提取标题栏主色，再按 ITU-R BT.709 相对亮度（带迟滞阈值）自动切换状态栏文字与 `SharpVectors` SVG 图标明暗（保留充电绿、红点等状态色）。
-2. **显示/隐藏右侧 YOYO Claw 按钮**
-   监听并同步接管状态栏右上角 `YoyoClawButton` 的 `Visibility` 属性，覆盖宿主异步状态刷新，实现实时显隐切换。
-3. **顶部栏通知图标原地右键联动原生菜单（通用兼容）**
-   拦截顶部状态栏固定图标（微信、飞书、QQ、钉钉、Everything、OneNote、PixPin / Qt5 / Qt6、Electron 等）的右键事件，枚举托盘窗口与 `HWND_MESSAGE` 隐藏窗口并按固定表 + **PE 导入表 / 延迟加载表（`DataDirectory[1/13]`）自动静态反汇编识别 `Shell_NotifyIconW/A` 与 `RegisterWindowMessageW/A` 回调消息**，直接在原程序隐藏托盘句柄原地 `PostMessage` 弹出原生右键菜单（按住 `Shift` 右键保留「从顶部栏移除」）。
-4. **支持拖拽任意系统溢出托盘图标固定到顶部栏（及直接拖回 `^` 箭头收起）**
-   展开 Windows `^` 隐藏托盘溢出窗后，通过全局鼠标钩子结合 UIA 遍历、进程窗口标题、注册表中英文别名以及裁剪前景像素的 16×16 视觉相似度匹配识别任意应用并持久化固定；需要将顶栏图标放回时，无需先点开箭头，直接将其拖到顶部 `^` 按钮上松手即可高亮收进隐藏托盘（兼容自定义固定图标与官方内置图标）。
-5. **顶栏空白处拖拽与双击控制最大化窗口**
-   无任何额外可见标题栏控件：在固定模式下在顶栏空白区按下左键向任意方向拖动超过 `6 DIP`，立即向底层最大化窗口发送还原并跟手移动窗口；双击顶栏空白处直接切换还原/最大化。
+### 一、顶部状态栏增强
+1. **全屏 / 最大化时状态栏自适应颜色**  
+   解决最大化后顶部始终存在一条透明桌面条的问题。通过 `EnumWindows` 与 `DWMWA_EXTENDED_FRAME_BOUNDS` 定位当前最大化窗口，使用 `BitBlt` 在标题栏接缝下方采样聚类提取主色，并按 ITU-R BT.709 亮度自动切换浅色/深色文字及 SVG 图标（保留充电绿、红点等状态色）。
+2. **显示 / 隐藏右侧 YOYO Claw 按钮**  
+   解决右上角默认无法关闭 YOYO Claw 按钮的顽疾。通过监听器接管并覆盖宿主 `YoyoClawButton` 可见性状态，实现设置中一键实时隐藏。
+3. **支持拖拽任意系统隐藏托盘图标固定到顶部栏（及直接拖回 `^` 箭头收起）**  
+   突破原版仅限飞书、钉钉、微信等少数应用的限制：展开 `^` 系统溢出托盘后，通过全局鼠标钩子结合 UIA 遍历、进程标题、注册表别名与前景裁剪的 16×16 视觉相似度匹配识别任意软件，拖到顶栏即可固定并支持持久化；需要收起时无需再次点开 `^` 弹窗，直接把顶栏图标拖回 `^` 箭头上松手即可收进隐藏托盘（或向下拖出状态栏 / `Shift + 右键`）。
+4. **顶部栏通知图标右键弹出程序原生菜单**  
+   解决原版固定图标按右键只有“从顶部栏移除”的问题。拦截顶栏图标右键事件并自动结合内置协议与 **PE 导入表 / 延迟加载表（`DataDirectory[1/13]`）静态扫描 `Shell_NotifyIconW/A` 与 `RegisterWindowMessageW/A`** 获取真实回调消息，直接原地向原程序托盘句柄 `PostMessage` 弹出软件自身的原生功能菜单（按住 `Shift + 右键` 仍可移除）。
+5. **顶栏空白处拖拽 & 双击控制已最大化窗口**  
+   配合全屏状态栏自适应颜色，让操作完全符合桌面窗口直觉，无需再去下面找程序真正的标题栏：在顶栏空白处按住左键向任意方向拖动超过 `6 DIP` 立即还原并跟手移动窗口，双击空白处可直接切换还原/最大化。
 
-### 底部任务栏（Dock）多任务增强
-6. **中键/关闭单窗口后保持多窗口缩略图展开**
-   拦截 `DockPreviewWindow` 关闭卡片后触发的 `PreviewInteractionCompleted -> HidePreview()`，转为就地移除目标项、重排并刷新布局（含 6 卡片切 5 卡片等版式切换重定位），让后续卡片留在光标下方方便连续关闭。
-7. **悬停缩略图卡片时桌面实时预览（Aero Peek）**
-   悬停 `DockPreviewWindow` 卡片时在桌面层下方显示点击穿透、不抢焦点的 `AeroPeekOverlayWindow`（含半透明深色遮罩与 `DwmRegisterThumbnail` 原窗实时镜像，兼容最小化窗口兜底遮罩），移开鼠标自动还原。
-8. **底部 Dock 多窗口预览斜向防误关走廊**
-   结合几何触发走廊判定与斜向轨迹/邻居驻留延迟切换，防止鼠标从 Dock 图标斜向移向缩略图卡片穿过分隔线或短暂擦碰相邻图标时误关或切走预览。
+### 二、底部 Dock 多任务增强
+6. **中键 / 点 × 关闭单窗口后保持多窗口缩略图展开**  
+   解决关闭一个窗口就把整个多窗口预览堆叠全关掉的问题：拦截单卡片关闭后的整窗收起回调，就地移除已关闭条目并重排刷新布局，方便连续关闭多个堆叠窗口。
+7. **对齐 Windows 二级预览：悬停缩略图卡片时桌面实时预览（Aero Peek）**  
+   补齐原版只有一级缩略图、面对多个 `cmd` 或同类窗口根本分不清谁是谁的痛点：悬停缩略图卡片时通过点击穿透覆层 + `DwmRegisterThumbnail` 在桌面临时还原并高亮指定窗口，鼠标移走立即收回，整体体验对标 Windows 原生二级预览。
+8. **Dock 多窗口预览斜向防误关走廊**  
+   解决鼠标从 Dock 滑动切换多任务时因判定范围问题导致预览经常突然收起的顽疾：计算 Dock 图标与缩略图之间的斜向移动走廊及邻居图标短暂驻留缓冲，斜滑穿过分隔线或轻微擦碰相邻图标不会误关预览。
 
-### 问题修复与性能体验优化
-9. **状态栏靠右弹窗屏幕边界钳位**
-   监听 `TopBarAcrylicPopupWindow` 打开与尺寸变化，自动将电池/音量/网络弹窗与亚克力背景钳位到当前显示器工作区安全范围内，避免隐藏部分按钮后弹窗右移出屏被裁切。
-10. **修复最大化后状态栏下方细缝**
-    监听顶部工作区保留协调引起的窗口位置偏移，在需要时将顶部状态栏底部向下微延展 `1-3 px` 盖住壁纸细缝，图标层锁定顶部不变。
-11. **控制中心与设置点击响应极速优化**
-    - 状态栏侧将按钮改为 `ClickMode.Press`（按下即响应）、直接向已驻留的 `HonorControlCenterWndTray` 发送异步消息、并让 `TopBarSettingsWindow` 关闭时转 `Hide()` 热复用。
-    - 控制中心侧通过 .NET 4.8 `AppDomainManager`（`ControlCenterSpeedBoost.dll`）预热亚克力与可视化树、清除隐藏后冷却与内存工作集限流、延后重扫描回调，并同步隐藏高斯模糊背景层消除关闭闪现。
-12. **顶部通知按钮极速响应与假死自愈**
-    按下即直连向已运行的 `MessageCenterUI` 发送 `WM_SECONDOPEN`（`0x0800`）零进程冷启直接唤起，跳过冗余预检与重复打开；若通知进程无响应卡死则自动清理重启兜底，并在已展开状态点击避免重复闪烁。
-13. **压力触控板三指轻触“智慧搜索”独立开关**
-    同步读写 `HKCU\SOFTWARE\PCManager\TouchPadSetting`（`TripleFingerLightTouch` 与手势列表中的 `27`）并直接向 Goodix ForcePad 厂商 HID 接口下发特征/控制指令（`[0E 11 00/01]`），单独禁用三指轻触触发智慧搜索而不影响三指拖拽与其他手势。
+### 三、问题修复与体验优化
+9. **修复右侧控制中心 / 电池 / 音量弹窗超出屏幕被裁切**  
+   隐藏部分右侧图标后弹窗随锚点右移容易出屏，监听器会自动将弹窗及其亚克力背景层限制在当前显示器安全工作区内。
+10. **修复窗口最大化后状态栏下方露出一线壁纸细缝**  
+    工作区重算导致最大化窗口下移 `1–3 px` 露缝时，自动向下延展状态栏容器底部边缘封住壁纸细缝，同时保持图标层对齐顶部不动。
+11. **控制中心与设置点击响应速度优化**  
+    状态栏按钮改为 `ClickMode.Press`（按下即发消息）、设置窗口 `Hide()` 热复用，并注入 `.NET 4.8 AppDomainManager` 提前离屏预热亚克力与可视化树、取消防连点冷却与工作集限流、同步模糊层隐藏消除闪现；除冷启动首次加载可能低于 3 秒外，日常打开几乎无感。
+12. **顶部通知按钮弹出速度优化，并修复假死**  
+    点击通知按钮按下瞬间直接通过内部 `WM_SECONDOPEN`（`0x0800`）消息直连唤醒常驻的 `MessageCenterUI`，免去重复冷启动延迟与反复闪烁，并在检测到通知进程假死无响应时自动清理重启兜底。
+13. **压力触控板三指轻触“智慧搜索”独立开关**  
+    解决移动办公高频误触痛点：同步读写 `HKCU\SOFTWARE\PCManager\TouchPadSetting` 并直接向 Goodix ForcePad HID 下发配置指令，单独关闭三指轻触触发「智慧搜索」而不影响三指拖拽与其他所有手势。
 
 ---
 
-## 目录说明
-- `一键安装.bat` / `apply_adaptive_topbar.ps1`：自动请求管理员提权部署并重启相关 UI 进程。
-- `一键卸载.bat` / `restore_topbar.ps1`：一键完整清理并还原官方原版状态（同时内嵌/复制进运行目录以供设置界面卸载按钮调用）。
-- `StartupHook.cs` / `TopBarHookCoordinator.cs`：.NET 6 运行时启动钩子入口与挂载调度。
-- `TopBarSettingsInjector.cs` / `ToolboxModuleRegistry.cs` / `AdaptiveSettingsStore.cs`：设置界面「Magic 视界工具箱」标签页注入、模块注册与配置持久化。
-- `ControlCenterSpeedBoost/`：控制中心（.NET 4.8）响应加速模块。
-- 其余各独立功能模块：`AdaptiveTopBarController.cs`、`NativeWindowSampler.cs`、`SvgIconThemer.cs`、`TopBarUiEnhancer.cs`、`StatusNotificationTrayRelay.cs`、`HiddenTrayPinEnhancer.cs`、`TopBarMaximizedWindowController.cs`、`TopBarAcrylicPopupClamper.cs`、`DockPreviewEnhancer.cs`、`TouchpadThreeFingerSearchController.cs`。
-
-> 诊断日志位置：`%TEMP%\MagicTaskbar\adaptive-topbar.log` 与 `%TEMP%\MagicTaskbar\control-center-boost.log`。
+## 运行与排查
+- 运行日志位于 `%TEMP%\MagicTaskbar\adaptive-topbar.log` 与 `%TEMP%\MagicTaskbar\control-center-boost.log`。
+- 也可在设置「Magic 视界工具箱」底部直接点击 **「打开目录」** 快速查看日志或 **「打开仓库」** 获取更新。
