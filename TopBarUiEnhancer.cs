@@ -51,11 +51,12 @@ namespace TopBarAdaptiveColor
         private readonly DependencyPropertyDescriptor? _notifSourceDescriptor;
         private readonly DependencyPropertyDescriptor? _notifBgDescriptor;
         private readonly DispatcherTimer? _notifAlertTimer;
-        private readonly HashSet<string> _ackedAppUnreadKeys = new(StringComparer.OrdinalIgnoreCase);
+        private readonly Dictionary<object, RotateTransform> _appShakeRotates = new();
         private RotateTransform? _notifShakeRotate;
         private bool _notifAlertActive;
         private bool _isUpdatingNotifVisual;
         private long _lastNotifShakeTick;
+        private long _lastAppShakeTick;
         private const string NotificationAlertHex = "#FF6A2B";
         private readonly ClickMode _origControlCenterClickMode = ClickMode.Release;
         private readonly ClickMode _origNotificationClickMode = ClickMode.Release;
@@ -606,8 +607,6 @@ namespace TopBarAdaptiveColor
             }
             _lastNotificationFastOpenTick = nowTick;
 
-            AcknowledgeCurrentUnreadApps();
-
             bool wasVisibleBefore = HasVisibleMessageCenterWindow();
             if (wasVisibleBefore)
             {
@@ -661,11 +660,9 @@ namespace TopBarAdaptiveColor
             }
 
             // Cold-start fallback: run off the UI thread so TopBarWindow never blocks during process creation.
-            Task.Run(() =>
-            {
-                KillUnresponsiveMessageCenterProcesses();
-                LaunchMessageCenterFallback(sysService, openMethod);
-            });
+            // Do not kill an existing PCManager-owned MessageCenterUI process when no window was found yet;
+            // LaunchMessageCenterFallback lets single-instance /r activation preserve any queued Honor messages.
+            Task.Run(() => LaunchMessageCenterFallback(sysService, openMethod));
         }
 
         private static void LaunchMessageCenterFallback(object? sysService, MethodInfo? openMethod)
@@ -1004,15 +1001,14 @@ namespace TopBarAdaptiveColor
                 return;
             }
 
+            long now = Environment.TickCount64;
             RefreshNotificationAlertVisual(allowImmediateShake: false);
-            if (_notifAlertActive)
+            if (_notifAlertActive && now - _lastNotifShakeTick >= 1950)
             {
-                long now = Environment.TickCount64;
-                if (now - _lastNotifShakeTick >= 1950)
-                {
-                    TriggerNotificationShake(now);
-                }
+                TriggerNotificationShake(now);
             }
+
+            RefreshUnreadAppShakeVisuals(now);
         }
 
         internal bool RefreshNotificationAlertVisual(bool allowImmediateShake)
@@ -1023,8 +1019,7 @@ namespace TopBarAdaptiveColor
             }
 
             bool sysUnread = _hasNotificationField?.GetValue(_window) is true;
-            bool appUnread = HasAnyUnackedAppUnread();
-            bool shouldAlert = AdaptiveSettingsStore.IsNotificationAlertAnimationEnabled && (sysUnread || appUnread);
+            bool shouldAlert = AdaptiveSettingsStore.IsNotificationAlertAnimationEnabled && sysUnread;
 
             if (!shouldAlert)
             {
@@ -1086,6 +1081,8 @@ namespace TopBarAdaptiveColor
                 _notifShakeRotate.Angle = 0.0;
             }
 
+            ClearUnreadAppShakeVisuals();
+
             if (wasActive && _notificationIcon != null)
             {
                 SvgIconThemer.SetElementAlertHex(_notificationIcon, null);
@@ -1114,27 +1111,125 @@ namespace TopBarAdaptiveColor
                 return;
             }
 
-            if (_notifShakeRotate == null)
+            _notifShakeRotate ??= AttachShakeTransform(target);
+            StartShakeKeyFrames(_notifShakeRotate);
+        }
+
+        private void RefreshUnreadAppShakeVisuals(long nowTick)
+        {
+            if (!AdaptiveSettingsStore.IsNotificationAlertAnimationEnabled || _statusItemsControl == null)
             {
-                _notifShakeRotate = new RotateTransform(0.0);
-                target.RenderTransformOrigin = new Point(0.5, 0.25);
-                if (target.RenderTransform is TransformGroup existingGroup)
+                ClearUnreadAppShakeVisuals();
+                return;
+            }
+
+            var activeItems = new HashSet<object>();
+            bool dueForShake = nowTick - _lastAppShakeTick >= 1950;
+            bool shookAny = false;
+
+            foreach (object? item in _statusItemsControl.Items)
+            {
+                if (item == null)
                 {
-                    existingGroup.Children.Add(_notifShakeRotate);
+                    continue;
                 }
-                else if (target.RenderTransform != null && !target.RenderTransform.IsFrozen && target.RenderTransform != Transform.Identity)
+
+                bool hasUnread = item.GetType().GetProperty("HasUnread", BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic)?.GetValue(item) is true;
+                if (!hasUnread)
                 {
-                    var tg = new TransformGroup();
-                    tg.Children.Add(target.RenderTransform);
-                    tg.Children.Add(_notifShakeRotate);
-                    target.RenderTransform = tg;
+                    continue;
                 }
-                else
+
+                activeItems.Add(item);
+                if (_statusItemsControl.ItemContainerGenerator.ContainerFromItem(item) is not UIElement container)
                 {
-                    target.RenderTransform = _notifShakeRotate;
+                    continue;
+                }
+
+                bool isNew = false;
+                if (!_appShakeRotates.TryGetValue(item, out RotateTransform? rt))
+                {
+                    rt = AttachShakeTransform(container);
+                    _appShakeRotates[item] = rt;
+                    isNew = true;
+                }
+
+                if (isNew || dueForShake)
+                {
+                    StartShakeKeyFrames(rt);
+                    shookAny = true;
                 }
             }
 
+            if (shookAny)
+            {
+                _lastAppShakeTick = nowTick;
+            }
+
+            if (_appShakeRotates.Count > 0)
+            {
+                List<object>? stale = null;
+                foreach (KeyValuePair<object, RotateTransform> kv in _appShakeRotates)
+                {
+                    if (!activeItems.Contains(kv.Key))
+                    {
+                        kv.Value.BeginAnimation(RotateTransform.AngleProperty, null);
+                        kv.Value.Angle = 0.0;
+                        stale ??= new List<object>();
+                        stale.Add(kv.Key);
+                    }
+                }
+
+                if (stale != null)
+                {
+                    foreach (object key in stale)
+                    {
+                        _appShakeRotates.Remove(key);
+                    }
+                }
+            }
+        }
+
+        private void ClearUnreadAppShakeVisuals()
+        {
+            if (_appShakeRotates.Count == 0)
+            {
+                return;
+            }
+
+            foreach (RotateTransform rt in _appShakeRotates.Values)
+            {
+                rt.BeginAnimation(RotateTransform.AngleProperty, null);
+                rt.Angle = 0.0;
+            }
+            _appShakeRotates.Clear();
+        }
+
+        private static RotateTransform AttachShakeTransform(UIElement target)
+        {
+            var rotate = new RotateTransform(0.0);
+            target.RenderTransformOrigin = new Point(0.5, 0.25);
+            if (target.RenderTransform is TransformGroup existingGroup)
+            {
+                existingGroup.Children.Add(rotate);
+            }
+            else if (target.RenderTransform != null && !target.RenderTransform.IsFrozen && target.RenderTransform != Transform.Identity)
+            {
+                var tg = new TransformGroup();
+                tg.Children.Add(target.RenderTransform);
+                tg.Children.Add(rotate);
+                target.RenderTransform = tg;
+            }
+            else
+            {
+                target.RenderTransform = rotate;
+            }
+
+            return rotate;
+        }
+
+        private static void StartShakeKeyFrames(RotateTransform rotate)
+        {
             var anim = new DoubleAnimationUsingKeyFrames
             {
                 Duration = TimeSpan.FromMilliseconds(420),
@@ -1148,63 +1243,7 @@ namespace TopBarAdaptiveColor
             anim.KeyFrames.Add(new LinearDoubleKeyFrame(-4.0, KeyTime.FromTimeSpan(TimeSpan.FromMilliseconds(340))));
             anim.KeyFrames.Add(new LinearDoubleKeyFrame(0.0, KeyTime.FromTimeSpan(TimeSpan.FromMilliseconds(420))));
 
-            _notifShakeRotate.BeginAnimation(RotateTransform.AngleProperty, anim, HandoffBehavior.SnapshotAndReplace);
-        }
-
-        private IEnumerable<(string Key, bool HasUnread)> EnumerateStatusNotificationStates()
-        {
-            if (_statusItemsControl == null)
-            {
-                yield break;
-            }
-
-            foreach (object? item in _statusItemsControl.Items)
-            {
-                if (item == null)
-                {
-                    continue;
-                }
-
-                Type itemType = item.GetType();
-                bool hasUnread = itemType.GetProperty("HasUnread", BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic)?.GetValue(item) is true;
-                var (appId, displayName, _, _) = StatusNotificationTrayRelay.ReadNotificationItemMetadata(item);
-                string key = !string.IsNullOrWhiteSpace(appId) ? appId! : (displayName ?? itemType.Name);
-                yield return (key, hasUnread);
-            }
-        }
-
-        private bool HasAnyUnackedAppUnread()
-        {
-            var activeUnread = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
-            foreach (var (key, hasUnread) in EnumerateStatusNotificationStates())
-            {
-                if (hasUnread)
-                {
-                    activeUnread.Add(key);
-                }
-            }
-
-            _ackedAppUnreadKeys.RemoveWhere(k => !activeUnread.Contains(k));
-            foreach (string key in activeUnread)
-            {
-                if (!_ackedAppUnreadKeys.Contains(key))
-                {
-                    return true;
-                }
-            }
-
-            return false;
-        }
-
-        private void AcknowledgeCurrentUnreadApps()
-        {
-            foreach (var (key, hasUnread) in EnumerateStatusNotificationStates())
-            {
-                if (hasUnread)
-                {
-                    _ackedAppUnreadKeys.Add(key);
-                }
-            }
+            rotate.BeginAnimation(RotateTransform.AngleProperty, anim, HandoffBehavior.SnapshotAndReplace);
         }
     }
 

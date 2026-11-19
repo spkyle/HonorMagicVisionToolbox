@@ -131,8 +131,8 @@ namespace TopBarAdaptiveColor
                 ControlKind = ToolboxControlKind.Toggle,
                 TitleZh = "未读通知变色与震动提醒",
                 TitleEn = "Highlight & shake Notification button (~2s) on unread alerts",
-                DescriptionZh = "存在系统未读通知或顶栏应用图标闪烁时，通知按钮切换橙色高亮并约每 2 秒轻抖一次；点击或已读后恢复",
-                DescriptionEn = "Apply a distinct highlight color and ~2s shake on NotificationButton while unread notifications or flashing tray alerts exist",
+                DescriptionZh = "仅当通知中心确有未读消息时，通知按钮切换橙色高亮并约每 2 秒轻抖一次；微信等顶栏应用图标闪烁时则仅在对应应用图标上每 2 秒轻抖提示",
+                DescriptionEn = "Apply a distinct highlight color and ~2s shake on NotificationButton only when MessageCenter actually has unread notices, and ~2s shake on flashing top bar app icons themselves",
                 DefaultEnabled = true
             },
             new()

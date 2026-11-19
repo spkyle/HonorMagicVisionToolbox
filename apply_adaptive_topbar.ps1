@@ -182,6 +182,24 @@ if (Test-Path $ccExe) {
         Write-Host "已部署控制中心响应加速模块: $dstBoostDll" -ForegroundColor Green
     }
 
+    if ((-not (Test-Path $dstBoostDll)) -or (-not (Test-Path $dstBoostCfg))) {
+        throw "未检测到控制中心响应加速模块或配置文件: $dstBoostCfg"
+    }
+
+    # Guard against Honor watchdog relaunching ControlCenterTrayUI.exe before .exe.config landed.
+    $cfgWriteUtc = (Get-Item $dstBoostCfg).LastWriteTimeUtc
+    $staleCcProcs = @(Get-Process -Name "ControlCenterTrayUI" -ErrorAction SilentlyContinue | Where-Object {
+        try { $_.StartTime.ToUniversalTime() -lt $cfgWriteUtc } catch { $true }
+    })
+    if ($staleCcProcs.Count -gt 0) {
+        foreach ($p in $staleCcProcs) {
+            try {
+                Stop-Process -Id $p.Id -Force -ErrorAction SilentlyContinue
+                $null = $p.WaitForExit(3000)
+            } catch {}
+        }
+    }
+
     Start-Sleep -Seconds 2
     $ccRestarted = Get-Process -Name "ControlCenterTrayUI" -ErrorAction SilentlyContinue
     if (-not $ccRestarted) {
