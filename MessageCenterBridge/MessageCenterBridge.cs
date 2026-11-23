@@ -49,6 +49,8 @@ namespace MessageCenterBridge
 
             try
             {
+                MessageCenterWindowOptimizer.ApplyConfiguredRenderMode();
+
                 EventManager.RegisterClassHandler(
                     typeof(FrameworkElement),
                     FrameworkElement.LoadedEvent,
@@ -1433,9 +1435,19 @@ namespace MessageCenterBridge
             "\"fast_notification_response\"\\s*:\\s*(true|false)",
             RegexOptions.Compiled | RegexOptions.IgnoreCase);
 
+        private static readonly Regex SoftwareRenderingRegex = new Regex(
+            "\"fast_open_software_rendering\"\\s*:\\s*(true|false)",
+            RegexOptions.Compiled | RegexOptions.IgnoreCase);
+
+        private static readonly Regex IdleTrimRegex = new Regex(
+            "\"fast_open_idle_memory_trim\"\\s*:\\s*(true|false)",
+            RegexOptions.Compiled | RegexOptions.IgnoreCase);
+
         private static readonly object Sync = new object();
         private static DateTime _lastWriteUtc = DateTime.MinValue;
         private static bool _cachedEnabled = true;
+        private static bool _cachedSoftwareRendering;
+        private static bool _cachedIdleTrim;
 
         public static void InvalidateCache()
         {
@@ -1445,13 +1457,68 @@ namespace MessageCenterBridge
             }
         }
 
+        public static int GetIdleTrimDelayMs(int defaultMs)
+        {
+            string raw = Environment.GetEnvironmentVariable("MAGICTASKBAR_TEST_IDLE_TRIM_MS");
+            int parsed;
+            if (!string.IsNullOrEmpty(raw) && int.TryParse(raw, out parsed) && parsed >= 20)
+            {
+                return parsed;
+            }
+            return defaultMs;
+        }
+
         public static bool IsFastNotificationEnabled()
+        {
+            EnsureLoaded();
+            lock (Sync)
+            {
+                return _cachedEnabled;
+            }
+        }
+
+        public static bool IsSoftwareRenderingEnabled()
+        {
+            EnsureLoaded();
+            lock (Sync)
+            {
+                return _cachedSoftwareRendering;
+            }
+        }
+
+        public static bool IsIdleMemoryTrimEnabled()
+        {
+            EnsureLoaded();
+            lock (Sync)
+            {
+                return _cachedIdleTrim;
+            }
+        }
+
+        private static bool ParseFlag(string text, Regex regex, bool defaultValue)
+        {
+            Match m = regex.Match(text);
+            if (!m.Success)
+            {
+                return defaultValue;
+            }
+            return string.Equals(m.Groups[1].Value, "true", StringComparison.OrdinalIgnoreCase);
+        }
+
+        private static void EnsureLoaded()
         {
             try
             {
                 if (!File.Exists(ConfigPath))
                 {
-                    return true;
+                    lock (Sync)
+                    {
+                        _cachedEnabled = true;
+                        _cachedSoftwareRendering = false;
+                        _cachedIdleTrim = false;
+                        _lastWriteUtc = DateTime.MinValue;
+                    }
+                    return;
                 }
 
                 DateTime mtime = File.GetLastWriteTimeUtc(ConfigPath);
@@ -1459,19 +1526,24 @@ namespace MessageCenterBridge
                 {
                     if (mtime == _lastWriteUtc)
                     {
-                        return _cachedEnabled;
+                        return;
                     }
 
                     string text = File.ReadAllText(ConfigPath, Encoding.UTF8);
-                    Match m = FastNotifRegex.Match(text);
-                    _cachedEnabled = !m.Success || string.Equals(m.Groups[1].Value, "true", StringComparison.OrdinalIgnoreCase);
+                    _cachedEnabled = ParseFlag(text, FastNotifRegex, true);
+                    _cachedSoftwareRendering = ParseFlag(text, SoftwareRenderingRegex, false);
+                    _cachedIdleTrim = ParseFlag(text, IdleTrimRegex, false);
                     _lastWriteUtc = mtime;
-                    return _cachedEnabled;
                 }
             }
             catch
             {
-                return true;
+                lock (Sync)
+                {
+                    _cachedEnabled = true;
+                    _cachedSoftwareRendering = false;
+                    _cachedIdleTrim = false;
+                }
             }
         }
     }
@@ -1486,6 +1558,7 @@ namespace MessageCenterBridge
     {
         private const uint UnlimitProcessMemoryMsg = 1002u;
         private const double FastStoryboardSpeedRatio = 1000.0;
+        private const int DefaultIdleTrimDelayMs = 180000;
 
         private static readonly ConditionalWeakTable<Window, MessageCenterWindowOptimizer> Attached =
             new ConditionalWeakTable<Window, MessageCenterWindowOptimizer>();
@@ -1521,6 +1594,7 @@ namespace MessageCenterBridge
         private bool _hideFallbackDetached;
         private FileSystemWatcher _configWatcher;
         private Timer _startupUnlimitTimer;
+        private DispatcherTimer _idleTrimTimer;
 
         private MessageCenterWindowOptimizer(Window window)
         {
@@ -1616,6 +1690,15 @@ namespace MessageCenterBridge
             _window.IsVisibleChanged += OnWindowIsVisibleChanged;
             _window.Closed += OnWindowClosed;
 
+            if (_isMainWindowAi && _window.Dispatcher != null)
+            {
+                _idleTrimTimer = new DispatcherTimer(DispatcherPriority.Background, _window.Dispatcher)
+                {
+                    Interval = TimeSpan.FromMilliseconds(BridgePerfConfig.GetIdleTrimDelayMs(DefaultIdleTrimDelayMs))
+                };
+                _idleTrimTimer.Tick += OnIdleTrimTick;
+            }
+
             StartConfigWatcher();
             ApplyLiveSettings();
 
@@ -1636,6 +1719,7 @@ namespace MessageCenterBridge
                                 {
                                     UnlimitProcessMemory();
                                     ResetCooldowns();
+                                    SyncIdleTrimTimer();
                                 }
                             }));
                         }
@@ -1648,6 +1732,25 @@ namespace MessageCenterBridge
             }
 
             BridgeLog.Info("MessageCenterWindowOptimizer attached to " + winType.Name + " (fast=" + BridgePerfConfig.IsFastNotificationEnabled() + ").");
+        }
+
+        internal static void ApplyConfiguredRenderMode()
+        {
+            try
+            {
+                RenderMode desired = (BridgePerfConfig.IsFastNotificationEnabled() && BridgePerfConfig.IsSoftwareRenderingEnabled())
+                    ? RenderMode.SoftwareOnly
+                    : RenderMode.Default;
+                if (RenderOptions.ProcessRenderMode != desired)
+                {
+                    RenderOptions.ProcessRenderMode = desired;
+                    BridgeLog.Info("Applied MessageCenter ProcessRenderMode=" + desired);
+                }
+            }
+            catch (Exception ex)
+            {
+                BridgeLog.Warn("ApplyConfiguredRenderMode failed: " + ex.Message);
+            }
         }
 
         public static void Attach(Window w)
@@ -1669,6 +1772,7 @@ namespace MessageCenterBridge
 
         private void ApplyLiveSettings()
         {
+            ApplyConfiguredRenderMode();
             bool fast = BridgePerfConfig.IsFastNotificationEnabled();
 
             if (_origContentRenderedDelegate != null)
@@ -1744,6 +1848,8 @@ namespace MessageCenterBridge
             {
                 BridgeLog.Warn("MessageCenter ApplyLiveSettings failed: " + ex.Message);
             }
+
+            SyncIdleTrimTimer();
         }
 
         private void OnFastSlideOutCompleted(object sender, EventArgs e)
@@ -1823,6 +1929,7 @@ namespace MessageCenterBridge
                 }
 
                 UnlimitProcessMemory();
+                RestartIdleTrimTimer();
             }
             catch (Exception ex)
             {
@@ -1832,17 +1939,112 @@ namespace MessageCenterBridge
 
         private void OnWindowIsVisibleChanged(object sender, DependencyPropertyChangedEventArgs e)
         {
+            ApplyLiveSettings();
             if (!BridgePerfConfig.IsFastNotificationEnabled())
+            {
+                if (_idleTrimTimer != null)
+                {
+                    _idleTrimTimer.Stop();
+                }
+                return;
+            }
+
+            ResetCooldowns();
+            if (_window.IsVisible)
+            {
+                if (_idleTrimTimer != null)
+                {
+                    _idleTrimTimer.Stop();
+                }
+                UnlimitProcessMemory();
+                if (_window.Opacity < 0.99)
+                {
+                    _window.Opacity = 1.0;
+                }
+            }
+            else
+            {
+                RestartIdleTrimTimer();
+            }
+        }
+
+        private void RestartIdleTrimTimer()
+        {
+            if (_idleTrimTimer == null)
             {
                 return;
             }
 
-            ApplyLiveSettings();
-            ResetCooldowns();
-            UnlimitProcessMemory();
-            if (_window.IsVisible && _window.Opacity < 0.99)
+            if (_isMainWindowAi &&
+                !_window.IsVisible &&
+                BridgePerfConfig.IsFastNotificationEnabled() &&
+                BridgePerfConfig.IsIdleMemoryTrimEnabled())
             {
-                _window.Opacity = 1.0;
+                _idleTrimTimer.Interval = TimeSpan.FromMilliseconds(BridgePerfConfig.GetIdleTrimDelayMs(DefaultIdleTrimDelayMs));
+                _idleTrimTimer.Stop();
+                _idleTrimTimer.Start();
+            }
+            else
+            {
+                _idleTrimTimer.Stop();
+            }
+        }
+
+        private void SyncIdleTrimTimer()
+        {
+            if (_idleTrimTimer == null)
+            {
+                return;
+            }
+
+            if (_isMainWindowAi &&
+                !_window.IsVisible &&
+                BridgePerfConfig.IsFastNotificationEnabled() &&
+                BridgePerfConfig.IsIdleMemoryTrimEnabled())
+            {
+                TimeSpan desired = TimeSpan.FromMilliseconds(BridgePerfConfig.GetIdleTrimDelayMs(DefaultIdleTrimDelayMs));
+                if (_idleTrimTimer.Interval != desired)
+                {
+                    _idleTrimTimer.Interval = desired;
+                }
+                if (!_idleTrimTimer.IsEnabled)
+                {
+                    _idleTrimTimer.Start();
+                }
+            }
+            else
+            {
+                _idleTrimTimer.Stop();
+            }
+        }
+
+        private void OnIdleTrimTick(object sender, EventArgs e)
+        {
+            if (_idleTrimTimer != null)
+            {
+                _idleTrimTimer.Stop();
+            }
+
+            if (!_isMainWindowAi ||
+                _window.IsVisible ||
+                !BridgePerfConfig.IsFastNotificationEnabled() ||
+                !BridgePerfConfig.IsIdleMemoryTrimEnabled())
+            {
+                return;
+            }
+
+            try
+            {
+                GC.Collect(GC.MaxGeneration, GCCollectionMode.Optimized, false, true);
+                using (Process proc = Process.GetCurrentProcess())
+                {
+                    SetProcessWorkingSetSize(proc.Handle, new IntPtr(-1), new IntPtr(-1));
+                }
+                BridgeLog.Info("Soft-trimmed idle MessageCenterUI working set (fast_open_idle_memory_trim=true).");
+            }
+            catch (Exception ex)
+            {
+                BridgeLog.Warn("MessageCenter idle working-set trim failed: " + ex.Message);
             }
         }
 
@@ -1932,6 +2134,12 @@ namespace MessageCenterBridge
             _window.IsVisibleChanged -= OnWindowIsVisibleChanged;
             _window.Closed -= OnWindowClosed;
 
+            if (_idleTrimTimer != null)
+            {
+                _idleTrimTimer.Stop();
+                _idleTrimTimer.Tick -= OnIdleTrimTick;
+            }
+
             Timer st = Interlocked.Exchange(ref _startupUnlimitTimer, null);
             if (st != null)
             {
@@ -1971,6 +2179,10 @@ namespace MessageCenterBridge
                 _configWatcher = null;
             }
         }
+
+        [DllImport("kernel32.dll", SetLastError = true)]
+        [return: MarshalAs(UnmanagedType.Bool)]
+        private static extern bool SetProcessWorkingSetSize(IntPtr hProcess, IntPtr dwMinimumWorkingSetSize, IntPtr dwMaximumWorkingSetSize);
     }
 
     internal static class BridgeLog

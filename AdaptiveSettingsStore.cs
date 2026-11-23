@@ -23,6 +23,8 @@ namespace TopBarAdaptiveColor
         public static event Action<bool>? NotificationAlertAnimationChanged;
         public static event Action<bool>? FastSettingsChanged;
         public static event Action<bool>? FastNotificationChanged;
+        public static event Action<bool>? FastOpenSoftwareRenderingChanged;
+        public static event Action<bool>? FastOpenIdleMemoryTrimChanged;
         public static event Action<bool>? NativeTrayRightClickChanged;
         public static event Action<bool>? HiddenTrayIconPinningChanged;
         public static event Action<bool>? TopBarMaximizedWindowDragChanged;
@@ -44,6 +46,10 @@ namespace TopBarAdaptiveColor
         public static bool IsFastSettingsResponseEnabled => IsModuleEnabled(ToolboxModuleIds.FastSettingsResponse, true);
 
         public static bool IsFastNotificationResponseEnabled => IsModuleEnabled(ToolboxModuleIds.FastNotificationResponse, true);
+
+        public static bool IsFastOpenSoftwareRenderingEnabled => IsModuleEnabled(ToolboxModuleIds.FastOpenSoftwareRendering, false);
+
+        public static bool IsFastOpenIdleMemoryTrimEnabled => IsModuleEnabled(ToolboxModuleIds.FastOpenIdleMemoryTrim, false);
 
         public static bool IsNativeTrayRightClickEnabled => IsModuleEnabled(ToolboxModuleIds.NativeTrayRightClick, true);
 
@@ -177,6 +183,14 @@ namespace TopBarAdaptiveColor
             else if (string.Equals(moduleId, ToolboxModuleIds.FastNotificationResponse, StringComparison.Ordinal))
             {
                 FastNotificationChanged?.Invoke(enabled);
+            }
+            else if (string.Equals(moduleId, ToolboxModuleIds.FastOpenSoftwareRendering, StringComparison.Ordinal))
+            {
+                FastOpenSoftwareRenderingChanged?.Invoke(enabled);
+            }
+            else if (string.Equals(moduleId, ToolboxModuleIds.FastOpenIdleMemoryTrim, StringComparison.Ordinal))
+            {
+                FastOpenIdleMemoryTrimChanged?.Invoke(enabled);
             }
             else if (string.Equals(moduleId, ToolboxModuleIds.NativeTrayRightClick, StringComparison.Ordinal))
             {

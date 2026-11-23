@@ -62,8 +62,9 @@ public static class StartupHook
     {
         TopBarAdaptiveColor.DiagnosticLog.Info("StartupHook.Initialize entered.");
 
-        if (TopBarAdaptiveColor.AdaptiveSettingsStore.IsFastSettingsResponseEnabled ||
-            TopBarAdaptiveColor.AdaptiveSettingsStore.IsFastNotificationResponseEnabled)
+        if ((TopBarAdaptiveColor.AdaptiveSettingsStore.IsFastSettingsResponseEnabled ||
+             TopBarAdaptiveColor.AdaptiveSettingsStore.IsFastNotificationResponseEnabled) &&
+            !TopBarAdaptiveColor.AdaptiveSettingsStore.IsFastOpenIdleMemoryTrimEnabled)
         {
             Environment.SetEnvironmentVariable("MAGICTASKBAR_DISABLE_WORKING_SET_TRIM", "1");
             TopBarAdaptiveColor.DiagnosticLog.Info("Set MAGICTASKBAR_DISABLE_WORKING_SET_TRIM=1 before host startup.");

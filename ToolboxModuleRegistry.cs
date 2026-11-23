@@ -38,6 +38,8 @@ namespace TopBarAdaptiveColor
         public const string TopBarPopupEdgeClamp = "topbar_popup_edge_clamp";
         public const string FastSettingsResponse = "fast_settings_response";
         public const string FastNotificationResponse = "fast_notification_response";
+        public const string FastOpenSoftwareRendering = "fast_open_software_rendering";
+        public const string FastOpenIdleMemoryTrim = "fast_open_idle_memory_trim";
         public const string TouchpadThreeFingerSearch = "touchpad_three_finger_search";
         public const string ActionOpenGitHub = "action_open_github";
         public const string ActionOpenLogs = "action_open_logs";
@@ -62,6 +64,7 @@ namespace TopBarAdaptiveColor
         public string DescriptionZh { get; init; } = string.Empty;
         public string DescriptionEn { get; init; } = string.Empty;
         public bool DefaultEnabled { get; init; } = true;
+        public IReadOnlyList<string>? ParentModuleIds { get; init; }
         public string? ActionTextZh { get; init; }
         public string? ActionTextEn { get; init; }
         public bool IsDestructiveAction { get; init; }
@@ -244,6 +247,38 @@ namespace TopBarAdaptiveColor
                 DescriptionZh = "直接向通知中心进程发送唤醒消息减少延迟，进程无响应时自动重建；再次点击图标可收起面板",
                 DescriptionEn = "Trigger on press, wake existing MessageCenter directly, auto-recover if stuck, and dismiss when clicking the button again",
                 DefaultEnabled = true
+            },
+            new()
+            {
+                Id = ToolboxModuleIds.FastOpenSoftwareRendering,
+                Category = ToolboxCategory.BugFixes,
+                ControlKind = ToolboxControlKind.Toggle,
+                ParentModuleIds = new[]
+                {
+                    ToolboxModuleIds.FastSettingsResponse,
+                    ToolboxModuleIds.FastNotificationResponse
+                },
+                TitleZh = "秒开省内存 · 软件渲染降占",
+                TitleEn = "Fast-open memory saver · Software rendering",
+                DescriptionZh = "二级开关：控制中心与通知中心强制使用 WPF 软件渲染以减少约 130+ MB 渲染缓冲；可单独开启或与下方闲置释放叠加（默认全关为最流畅常驻，切换后重启对应弹窗生效）",
+                DescriptionEn = "Sub-option: force WPF software rendering for Control Center & Notification Center to cut ~130+ MB GPU buffer footprint; stackable with idle release (off by default for max fluidity; applies on popup restart)",
+                DefaultEnabled = false
+            },
+            new()
+            {
+                Id = ToolboxModuleIds.FastOpenIdleMemoryTrim,
+                Category = ToolboxCategory.BugFixes,
+                ControlKind = ToolboxControlKind.Toggle,
+                ParentModuleIds = new[]
+                {
+                    ToolboxModuleIds.FastSettingsResponse,
+                    ToolboxModuleIds.FastNotificationResponse
+                },
+                TitleZh = "秒开省内存 · 闲置自动释放工作集",
+                TitleEn = "Fast-open memory saver · Release idle memory",
+                DescriptionZh = "二级开关：解除顶栏裁剪锁并允许回收托管垃圾，弹窗隐藏闲置 3 分钟后压缩工作集大幅降低常驻占用；久置首开可能有短暂微顿（默认全关为最流畅常驻，可单独开启或与软件渲染叠加）",
+                DescriptionEn = "Sub-option: allow TopBar trim & GC compaction, and softly trim popup working set after 3m idle (may cause a brief page-in hesitation after long idle; off by default; stackable)",
+                DefaultEnabled = false
             },
             new()
             {

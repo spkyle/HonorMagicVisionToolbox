@@ -58,6 +58,7 @@ namespace TopBarAdaptiveColor
             private readonly TextBlock _toolboxButtonText;
             private readonly ScrollViewer _toolboxPanel;
             private readonly Dictionary<string, CheckBox> _toggleControls = new(StringComparer.Ordinal);
+            private readonly List<(IReadOnlyList<string> Parents, FrameworkElement Row, CheckBox? Toggle)> _dependentRows = new();
             private readonly List<FrameworkElement> _nativePanels = new();
             private readonly MethodInfo? _showTabMethod;
             private readonly FieldInfo? _selectedTabBgField;
@@ -126,7 +127,7 @@ namespace TopBarAdaptiveColor
                     return null;
                 }
 
-                var (toolboxPanel, toggleControls) = BuildToolboxScrollPanel(settingsWindow, anchorPanel, notificationCanvas, acrylicCheckBox, isChinese);
+                var (toolboxPanel, toggleControls, dependentRows) = BuildToolboxScrollPanel(settingsWindow, anchorPanel, notificationCanvas, acrylicCheckBox, isChinese);
                 if (!InsertContentPanel(anchorPanel, toolboxPanel))
                 {
                     DiagnosticLog.Warn("TopBarSettingsInjector: Unable to attach MagicToolbox content panel.");
@@ -146,6 +147,8 @@ namespace TopBarAdaptiveColor
                 {
                     host._toggleControls[kv.Key] = kv.Value;
                 }
+                host._dependentRows.AddRange(dependentRows);
+                host.SyncDependentRowStates();
 
                 host.HookNavigationAndLifecycle(settingsWindow, t, flags);
                 DiagnosticLog.Info($"Injected modular MagicToolbox tab & page ({host._toggleControls.Count} toggles).");
@@ -169,6 +172,35 @@ namespace TopBarAdaptiveColor
                         {
                             cb.IsChecked = val;
                         }
+                    }
+                }
+
+                SyncDependentRowStates();
+            }
+
+            private void SyncDependentRowStates()
+            {
+                foreach (var dep in _dependentRows)
+                {
+                    bool anyParentEnabled = false;
+                    for (int i = 0; i < dep.Parents.Count; i++)
+                    {
+                        string pid = dep.Parents[i];
+                        bool parentVal = _toggleControls.TryGetValue(pid, out CheckBox? parentCb)
+                            ? parentCb.IsChecked == true
+                            : AdaptiveSettingsStore.IsModuleEnabled(pid, true);
+                        if (parentVal)
+                        {
+                            anyParentEnabled = true;
+                            break;
+                        }
+                    }
+
+                    dep.Row.IsEnabled = anyParentEnabled;
+                    dep.Row.Opacity = anyParentEnabled ? 1.0 : 0.45;
+                    if (dep.Toggle != null)
+                    {
+                        dep.Toggle.IsEnabled = anyParentEnabled;
                     }
                 }
             }
@@ -286,6 +318,7 @@ namespace TopBarAdaptiveColor
                     {
                         cb.IsChecked = enabled;
                     }
+                    SyncDependentRowStates();
                 }));
             }
 
@@ -717,7 +750,7 @@ namespace TopBarAdaptiveColor
                 return false;
             }
 
-            private static (ScrollViewer Panel, Dictionary<string, CheckBox> Toggles) BuildToolboxScrollPanel(
+            private static (ScrollViewer Panel, Dictionary<string, CheckBox> Toggles, List<(IReadOnlyList<string> Parents, FrameworkElement Row, CheckBox? Toggle)> DependentRows) BuildToolboxScrollPanel(
                 Window settingsWindow,
                 FrameworkElement anchorPanel,
                 Canvas? notificationCanvas,
@@ -725,6 +758,7 @@ namespace TopBarAdaptiveColor
                 bool isChinese)
             {
                 var toggles = new Dictionary<string, CheckBox>(StringComparer.Ordinal);
+                var dependentRows = new List<(IReadOnlyList<string> Parents, FrameworkElement Row, CheckBox? Toggle)>();
                 FontFamily baseFont = FindFontFamily(notificationCanvas) ?? new FontFamily("HONOR Sans Design");
 
                 var scroll = new ScrollViewer
@@ -837,19 +871,22 @@ namespace TopBarAdaptiveColor
                     var cardStack = new StackPanel { Orientation = Orientation.Vertical };
                     for (int i = 0; i < items.Count; i++)
                     {
+                        bool isSubItem = items[i].ParentModuleIds is { Count: > 0 };
                         if (i > 0)
                         {
                             var divider = new Border
                             {
                                 Height = 1.0,
-                                Margin = new Thickness(16.0, 0.0, 16.0, 0.0),
+                                Margin = isSubItem
+                                    ? new Thickness(40.0, 0.0, 16.0, 0.0)
+                                    : new Thickness(16.0, 0.0, 16.0, 0.0),
                                 SnapsToDevicePixels = true
                             };
                             divider.SetResourceReference(Border.BackgroundProperty, "SettingsDividerBrush");
                             cardStack.Children.Add(divider);
                         }
 
-                        var row = BuildModuleRow(settingsWindow, items[i], templateCheckBox, baseFont, isChinese, toggles);
+                        var row = BuildModuleRow(settingsWindow, items[i], templateCheckBox, baseFont, isChinese, toggles, dependentRows);
                         cardStack.Children.Add(row);
                     }
 
@@ -858,7 +895,7 @@ namespace TopBarAdaptiveColor
                 }
 
                 scroll.Content = rootStack;
-                return (scroll, toggles);
+                return (scroll, toggles, dependentRows);
             }
 
             private static FrameworkElement BuildModuleRow(
@@ -867,12 +904,16 @@ namespace TopBarAdaptiveColor
                 CheckBox? templateCheckBox,
                 FontFamily baseFont,
                 bool isChinese,
-                Dictionary<string, CheckBox> toggles)
+                Dictionary<string, CheckBox> toggles,
+                List<(IReadOnlyList<string> Parents, FrameworkElement Row, CheckBox? Toggle)> dependentRows)
             {
+                bool isSubOption = module.ParentModuleIds is { Count: > 0 };
                 var grid = new Grid
                 {
-                    Margin = new Thickness(16.0, 12.0, 16.0, 12.0),
-                    MinHeight = 36.0
+                    Margin = isSubOption
+                        ? new Thickness(32.0, 10.0, 16.0, 10.0)
+                        : new Thickness(16.0, 12.0, 16.0, 12.0),
+                    MinHeight = isSubOption ? 32.0 : 36.0
                 };
                 grid.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(1.0, GridUnitType.Star) });
                 grid.ColumnDefinitions.Add(new ColumnDefinition { Width = GridLength.Auto });
@@ -891,7 +932,7 @@ namespace TopBarAdaptiveColor
                 {
                     Text = titleText,
                     FontFamily = baseFont,
-                    FontSize = 14.0,
+                    FontSize = isSubOption ? 13.5 : 14.0,
                     FontWeight = FontWeights.Normal,
                     TextWrapping = TextWrapping.Wrap
                 };
@@ -904,7 +945,7 @@ namespace TopBarAdaptiveColor
                     {
                         Text = descText,
                         FontFamily = baseFont,
-                        FontSize = 12.0,
+                        FontSize = isSubOption ? 11.5 : 12.0,
                         TextWrapping = TextWrapping.Wrap,
                         Margin = new Thickness(0.0, 3.0, 0.0, 0.0)
                     };
@@ -912,10 +953,31 @@ namespace TopBarAdaptiveColor
                     textPanel.Children.Add(descTb);
                 }
 
-                Grid.SetColumn(textPanel, 0);
-                grid.Children.Add(textPanel);
+                if (isSubOption)
+                {
+                    var subContainer = new DockPanel { LastChildFill = true };
+                    var guideBar = new Border
+                    {
+                        Width = 2.5,
+                        CornerRadius = new CornerRadius(1.25),
+                        Margin = new Thickness(0.0, 2.0, 10.0, 2.0),
+                        Opacity = 0.65
+                    };
+                    guideBar.SetResourceReference(Border.BackgroundProperty, "SettingsSelectedTabTextBrush");
+                    DockPanel.SetDock(guideBar, Dock.Left);
+                    subContainer.Children.Add(guideBar);
+                    subContainer.Children.Add(textPanel);
+                    Grid.SetColumn(subContainer, 0);
+                    grid.Children.Add(subContainer);
+                }
+                else
+                {
+                    Grid.SetColumn(textPanel, 0);
+                    grid.Children.Add(textPanel);
+                }
 
                 FrameworkElement actionControl;
+                CheckBox? createdToggle = null;
                 if (module.ControlKind == ToolboxControlKind.Toggle)
                 {
                     bool enabled = AdaptiveSettingsStore.IsModuleEnabled(module.Id, module.DefaultEnabled);
@@ -939,6 +1001,7 @@ namespace TopBarAdaptiveColor
                     };
 
                     toggles[module.Id] = cb;
+                    createdToggle = cb;
                     actionControl = cb;
                 }
                 else
@@ -951,6 +1014,12 @@ namespace TopBarAdaptiveColor
 
                 Grid.SetColumn(actionControl, 1);
                 grid.Children.Add(actionControl);
+
+                if (module.ParentModuleIds is { Count: > 0 })
+                {
+                    dependentRows.Add((module.ParentModuleIds, grid, createdToggle));
+                }
+
                 return grid;
             }
 

@@ -197,6 +197,7 @@ namespace TopBarAdaptiveColor
             AdaptiveSettingsStore.NotificationAlertAnimationChanged += OnNotificationAlertSettingChanged;
             AdaptiveSettingsStore.FastSettingsChanged += OnFastSettingsChanged;
             AdaptiveSettingsStore.FastNotificationChanged += OnFastSettingsChanged;
+            AdaptiveSettingsStore.FastOpenIdleMemoryTrimChanged += OnFastSettingsChanged;
 
             if (_notificationButton != null)
             {
@@ -406,18 +407,19 @@ namespace TopBarAdaptiveColor
                 ScheduleMessageCenterPrewarmIfNeeded();
             }
 
-            SyncHostWorkingSetTrimGuard(fastSettingsEnabled || fastNotifEnabled);
+            SyncHostWorkingSetTrimGuard(ShouldKeepHostWorkingSetWarm());
         }
+
+        internal static bool ShouldKeepHostWorkingSetWarm() =>
+            (AdaptiveSettingsStore.IsFastSettingsResponseEnabled ||
+             AdaptiveSettingsStore.IsFastNotificationResponseEnabled) &&
+            !AdaptiveSettingsStore.IsFastOpenIdleMemoryTrimEnabled;
 
         internal static void SyncHostWorkingSetTrimGuard(bool keepWarm)
         {
             try
             {
                 Environment.SetEnvironmentVariable("MAGICTASKBAR_DISABLE_WORKING_SET_TRIM", keepWarm ? "1" : null);
-                if (!keepWarm)
-                {
-                    return;
-                }
 
                 Assembly? sharedAsm = null;
                 foreach (Assembly a in AppDomain.CurrentDomain.GetAssemblies())
@@ -436,12 +438,39 @@ namespace TopBarAdaptiveColor
                 }
 
                 const BindingFlags flags = BindingFlags.Static | BindingFlags.Public | BindingFlags.NonPublic;
-                if (arc.GetField("_interactionTrimTimer", flags)?.GetValue(null) is DispatcherTimer itTimer && itTimer.IsEnabled)
+                var timers = arc.GetField("WorkingSetTrimTimers", flags)?.GetValue(null) as System.Collections.IList;
+                var itTimer = arc.GetField("_interactionTrimTimer", flags)?.GetValue(null) as DispatcherTimer;
+
+                if (!keepWarm)
+                {
+                    if (itTimer != null && !itTimer.IsEnabled)
+                    {
+                        itTimer.Start();
+                    }
+
+                    if (timers != null && timers.Count > 0)
+                    {
+                        for (int i = 0; i < timers.Count; i++)
+                        {
+                            if (timers[i] is DispatcherTimer t && !t.IsEnabled)
+                            {
+                                t.Start();
+                            }
+                        }
+                    }
+                    else if (Application.Current != null)
+                    {
+                        arc.GetMethod("ScheduleWorkingSetTrimming", flags)?.Invoke(null, new object[] { Application.Current });
+                    }
+                    return;
+                }
+
+                if (itTimer != null && itTimer.IsEnabled)
                 {
                     itTimer.Stop();
                 }
 
-                if (arc.GetField("WorkingSetTrimTimers", flags)?.GetValue(null) is System.Collections.IList timers)
+                if (timers != null)
                 {
                     for (int i = 0; i < timers.Count; i++)
                     {
@@ -983,6 +1012,7 @@ namespace TopBarAdaptiveColor
             AdaptiveSettingsStore.NotificationAlertAnimationChanged -= OnNotificationAlertSettingChanged;
             AdaptiveSettingsStore.FastSettingsChanged -= OnFastSettingsChanged;
             AdaptiveSettingsStore.FastNotificationChanged -= OnFastSettingsChanged;
+            AdaptiveSettingsStore.FastOpenIdleMemoryTrimChanged -= OnFastSettingsChanged;
 
             if (_notificationButton != null && _notifBgDescriptor != null)
             {

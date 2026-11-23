@@ -8,6 +8,8 @@ using System.Text;
 using System.Text.RegularExpressions;
 using System.Threading;
 using System.Windows;
+using System.Windows.Interop;
+using System.Windows.Media;
 using System.Windows.Media.Animation;
 using System.Windows.Threading;
 
@@ -40,6 +42,8 @@ namespace ControlCenterSpeedBoost
 
             try
             {
+                ControlCenterWindowOptimizer.ApplyConfiguredRenderMode();
+
                 EventManager.RegisterClassHandler(
                     typeof(Window),
                     FrameworkElement.LoadedEvent,
@@ -142,6 +146,7 @@ namespace ControlCenterSpeedBoost
         // Long enough for TrustCircleView's async DealGetOnlineDevices IPC (~220ms) to resize
         // the bottom card while still DWM-cloaked & off-screen before the first user click.
         private const int PreWarmDurationMs = 340;
+        private const int DefaultIdleTrimDelayMs = 180000;
         private const int DwmwaCloak = 13;
 
         private sealed class KeyframeBackup
@@ -177,6 +182,7 @@ namespace ControlCenterSpeedBoost
         private readonly double _origHideSpeedRatio = 1.0;
         private readonly KeyframeBackup[] _showOpacityKeyframes;
         private readonly DispatcherTimer _preWarmFinishTimer;
+        private readonly DispatcherTimer _idleTrimTimer;
 
         private bool _origHideHookDetached;
 
@@ -267,6 +273,12 @@ namespace ControlCenterSpeedBoost
                 Interval = TimeSpan.FromMilliseconds(PreWarmDurationMs)
             };
             _preWarmFinishTimer.Tick += OnPreWarmFinishTick;
+
+            _idleTrimTimer = new DispatcherTimer(DispatcherPriority.Background, _window.Dispatcher)
+            {
+                Interval = TimeSpan.FromMilliseconds(BoostConfig.GetIdleTrimDelayMs(DefaultIdleTrimDelayMs))
+            };
+            _idleTrimTimer.Tick += OnIdleTrimTick;
 
             _window.SourceInitialized += OnWindowSourceInitialized;
             _window.IsVisibleChanged += OnWindowIsVisibleChanged;
@@ -655,6 +667,7 @@ namespace ControlCenterSpeedBoost
                 _isPreWarming = false;
                 _windowFrameRendered = false;
                 BoostLog.Info("Pre-warmed AiDesktopMainWindow, plugins & CompositionAcrylic surface cleanly.");
+                ScheduleIdleTrimIfEnabled();
             }
         }
 
@@ -791,8 +804,10 @@ namespace ControlCenterSpeedBoost
             bool fast = BoostConfig.IsFastResponseEnabled();
             if (e.NewValue is bool && (bool)e.NewValue)
             {
+                _idleTrimTimer.Stop();
                 if (fast)
                 {
+                    UnlimitProcessMemory();
                     StopStoryboardSafely(_hideStoryboard);
                 }
                 EnsureShowReadyOpacity();
@@ -843,6 +858,10 @@ namespace ControlCenterSpeedBoost
             AttachCompHolderIfAvailable();
             ApplyLiveSettings();
             SyncBeforeShowInterceptor();
+            if (!(e.NewValue is bool && (bool)e.NewValue))
+            {
+                ScheduleIdleTrimIfEnabled();
+            }
         }
 
         private void OnHideStoryboardCompleted(object sender, EventArgs e)
@@ -890,6 +909,7 @@ namespace ControlCenterSpeedBoost
 
             UnlimitProcessMemory();
             SyncBeforeShowInterceptor();
+            ScheduleIdleTrimIfEnabled();
         }
 
         private void UnlimitProcessMemory()
@@ -908,8 +928,97 @@ namespace ControlCenterSpeedBoost
             }
         }
 
+        internal static void ApplyConfiguredRenderMode()
+        {
+            try
+            {
+                RenderMode desired = (BoostConfig.IsFastResponseEnabled() && BoostConfig.IsSoftwareRenderingEnabled())
+                    ? RenderMode.SoftwareOnly
+                    : RenderMode.Default;
+                if (RenderOptions.ProcessRenderMode != desired)
+                {
+                    RenderOptions.ProcessRenderMode = desired;
+                    BoostLog.Info("Applied ControlCenter ProcessRenderMode=" + desired);
+                }
+            }
+            catch (Exception ex)
+            {
+                BoostLog.Warn("ApplyConfiguredRenderMode failed: " + ex.Message);
+            }
+        }
+
+        private void ScheduleIdleTrimIfEnabled()
+        {
+            if (BoostConfig.IsFastResponseEnabled() &&
+                BoostConfig.IsIdleMemoryTrimEnabled() &&
+                !_isPreWarming &&
+                !_window.IsVisible &&
+                !IsWndVisible())
+            {
+                _idleTrimTimer.Interval = TimeSpan.FromMilliseconds(BoostConfig.GetIdleTrimDelayMs(DefaultIdleTrimDelayMs));
+                _idleTrimTimer.Stop();
+                _idleTrimTimer.Start();
+            }
+            else
+            {
+                _idleTrimTimer.Stop();
+            }
+        }
+
+        private void SyncIdleTrimTimer()
+        {
+            if (BoostConfig.IsFastResponseEnabled() &&
+                BoostConfig.IsIdleMemoryTrimEnabled() &&
+                !_isPreWarming &&
+                !_window.IsVisible &&
+                !IsWndVisible())
+            {
+                TimeSpan desired = TimeSpan.FromMilliseconds(BoostConfig.GetIdleTrimDelayMs(DefaultIdleTrimDelayMs));
+                if (_idleTrimTimer.Interval != desired)
+                {
+                    _idleTrimTimer.Interval = desired;
+                }
+                if (!_idleTrimTimer.IsEnabled)
+                {
+                    _idleTrimTimer.Start();
+                }
+            }
+            else
+            {
+                _idleTrimTimer.Stop();
+            }
+        }
+
+        private void OnIdleTrimTick(object sender, EventArgs e)
+        {
+            _idleTrimTimer.Stop();
+            if (!BoostConfig.IsFastResponseEnabled() ||
+                !BoostConfig.IsIdleMemoryTrimEnabled() ||
+                _isPreWarming ||
+                _window.IsVisible ||
+                IsWndVisible())
+            {
+                return;
+            }
+
+            try
+            {
+                GC.Collect(GC.MaxGeneration, GCCollectionMode.Optimized, false, true);
+                using (Process proc = Process.GetCurrentProcess())
+                {
+                    SetProcessWorkingSetSize(proc.Handle, new IntPtr(-1), new IntPtr(-1));
+                }
+                BoostLog.Info("Soft-trimmed idle ControlCenterTrayUI working set (fast_open_idle_memory_trim=true).");
+            }
+            catch (Exception ex)
+            {
+                BoostLog.Warn("ControlCenter idle working-set trim failed: " + ex.Message);
+            }
+        }
+
         private void ApplyLiveSettings()
         {
+            ApplyConfiguredRenderMode();
             bool fast = BoostConfig.IsFastResponseEnabled();
 
             try
@@ -993,6 +1102,8 @@ namespace ControlCenterSpeedBoost
             {
                 BoostLog.Warn("HideStoryboard SpeedRatio update failed: " + ex.Message);
             }
+
+            SyncIdleTrimTimer();
         }
 
         private static bool ContainsDelegate(Delegate combined, Delegate candidate)
@@ -1277,6 +1388,8 @@ namespace ControlCenterSpeedBoost
         {
             _preWarmFinishTimer.Stop();
             _preWarmFinishTimer.Tick -= OnPreWarmFinishTick;
+            _idleTrimTimer.Stop();
+            _idleTrimTimer.Tick -= OnIdleTrimTick;
             _window.SourceInitialized -= OnWindowSourceInitialized;
             _window.IsVisibleChanged -= OnWindowIsVisibleChanged;
             _window.Closed -= OnWindowClosed;
@@ -1310,6 +1423,10 @@ namespace ControlCenterSpeedBoost
 
         [DllImport("dwmapi.dll")]
         private static extern int DwmSetWindowAttribute(IntPtr hwnd, int attr, ref int attrValue, int attrSize);
+
+        [DllImport("kernel32.dll", SetLastError = true)]
+        [return: MarshalAs(UnmanagedType.Bool)]
+        private static extern bool SetProcessWorkingSetSize(IntPtr hProcess, IntPtr dwMinimumWorkingSetSize, IntPtr dwMaximumWorkingSetSize);
     }
 
     internal static class BoostConfig
@@ -1323,9 +1440,19 @@ namespace ControlCenterSpeedBoost
             "\"fast_settings_response\"\\s*:\\s*(true|false)",
             RegexOptions.Compiled | RegexOptions.IgnoreCase);
 
+        private static readonly Regex SoftwareRenderingRegex = new Regex(
+            "\"fast_open_software_rendering\"\\s*:\\s*(true|false)",
+            RegexOptions.Compiled | RegexOptions.IgnoreCase);
+
+        private static readonly Regex IdleTrimRegex = new Regex(
+            "\"fast_open_idle_memory_trim\"\\s*:\\s*(true|false)",
+            RegexOptions.Compiled | RegexOptions.IgnoreCase);
+
         private static readonly object Sync = new object();
         private static DateTime _lastWriteUtc = DateTime.MinValue;
         private static bool _cachedEnabled = true;
+        private static bool _cachedSoftwareRendering;
+        private static bool _cachedIdleTrim;
 
         public static void InvalidateCache()
         {
@@ -1335,13 +1462,68 @@ namespace ControlCenterSpeedBoost
             }
         }
 
+        public static int GetIdleTrimDelayMs(int defaultMs)
+        {
+            string raw = Environment.GetEnvironmentVariable("MAGICTASKBAR_TEST_IDLE_TRIM_MS");
+            int parsed;
+            if (!string.IsNullOrEmpty(raw) && int.TryParse(raw, out parsed) && parsed >= 20)
+            {
+                return parsed;
+            }
+            return defaultMs;
+        }
+
         public static bool IsFastResponseEnabled()
+        {
+            EnsureLoaded();
+            lock (Sync)
+            {
+                return _cachedEnabled;
+            }
+        }
+
+        public static bool IsSoftwareRenderingEnabled()
+        {
+            EnsureLoaded();
+            lock (Sync)
+            {
+                return _cachedSoftwareRendering;
+            }
+        }
+
+        public static bool IsIdleMemoryTrimEnabled()
+        {
+            EnsureLoaded();
+            lock (Sync)
+            {
+                return _cachedIdleTrim;
+            }
+        }
+
+        private static bool ParseFlag(string text, Regex regex, bool defaultValue)
+        {
+            Match m = regex.Match(text);
+            if (!m.Success)
+            {
+                return defaultValue;
+            }
+            return string.Equals(m.Groups[1].Value, "true", StringComparison.OrdinalIgnoreCase);
+        }
+
+        private static void EnsureLoaded()
         {
             try
             {
                 if (!File.Exists(ConfigPath))
                 {
-                    return true;
+                    lock (Sync)
+                    {
+                        _cachedEnabled = true;
+                        _cachedSoftwareRendering = false;
+                        _cachedIdleTrim = false;
+                        _lastWriteUtc = DateTime.MinValue;
+                    }
+                    return;
                 }
 
                 DateTime mtime = File.GetLastWriteTimeUtc(ConfigPath);
@@ -1349,19 +1531,24 @@ namespace ControlCenterSpeedBoost
                 {
                     if (mtime == _lastWriteUtc)
                     {
-                        return _cachedEnabled;
+                        return;
                     }
 
                     string text = File.ReadAllText(ConfigPath, Encoding.UTF8);
-                    Match m = FastSettingRegex.Match(text);
-                    _cachedEnabled = !m.Success || string.Equals(m.Groups[1].Value, "true", StringComparison.OrdinalIgnoreCase);
+                    _cachedEnabled = ParseFlag(text, FastSettingRegex, true);
+                    _cachedSoftwareRendering = ParseFlag(text, SoftwareRenderingRegex, false);
+                    _cachedIdleTrim = ParseFlag(text, IdleTrimRegex, false);
                     _lastWriteUtc = mtime;
-                    return _cachedEnabled;
                 }
             }
             catch
             {
-                return true;
+                lock (Sync)
+                {
+                    _cachedEnabled = true;
+                    _cachedSoftwareRendering = false;
+                    _cachedIdleTrim = false;
+                }
             }
         }
     }
