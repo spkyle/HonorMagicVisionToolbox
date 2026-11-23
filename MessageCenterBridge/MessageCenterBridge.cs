@@ -4,16 +4,19 @@ using System.Collections.Generic;
 using System.Diagnostics;
 using System.IO;
 using System.Reflection;
+using System.Runtime.CompilerServices;
 using System.Runtime.InteropServices;
 using System.Runtime.Serialization;
 using System.Runtime.Serialization.Json;
 using System.Text;
+using System.Text.RegularExpressions;
 using System.Threading;
 using System.Windows;
 using System.Windows.Controls;
 using System.Windows.Input;
 using System.Windows.Interop;
 using System.Windows.Media;
+using System.Windows.Media.Animation;
 using System.Windows.Media.Imaging;
 using System.Windows.Threading;
 
@@ -230,9 +233,15 @@ namespace MessageCenterBridge
         internal const string BridgedGuidPrefix = "mvt-app-";
         internal const string SyncWindowMessageName = "MagicVisionToolbox_SyncNotifications";
 
-        private static readonly string TempDir = Path.Combine(Path.GetTempPath(), "MagicTaskbar");
-        private static readonly string BridgeStatePath = Path.Combine(TempDir, "bridged-notifications.json");
-        private static readonly string BridgeAckPath = Path.Combine(TempDir, "bridged-notifications-ack.json");
+        private static string _tempDir = Path.Combine(Path.GetTempPath(), "MagicTaskbar");
+        private static string TempDir { get { return _tempDir; } }
+        private static string BridgeStatePath { get { return Path.Combine(_tempDir, "bridged-notifications.json"); } }
+        private static string BridgeAckPath { get { return Path.Combine(_tempDir, "bridged-notifications-ack.json"); } }
+
+        internal static void UseCustomTempDirForTests(string path)
+        {
+            _tempDir = string.IsNullOrEmpty(path) ? Path.Combine(Path.GetTempPath(), "MagicTaskbar") : path;
+        }
 
         private static readonly object Sync = new object();
         private static readonly Dictionary<IntPtr, Window> HookedWindows = new Dictionary<IntPtr, Window>();
@@ -349,6 +358,7 @@ namespace MessageCenterBridge
 
             EnsureHwndHook(w);
             HookClearButton(w);
+            MessageCenterWindowOptimizer.Attach(w);
             EnsureSyncInfrastructure(w.Dispatcher);
             SyncFromDiskOnUiThread();
         }
@@ -1408,6 +1418,557 @@ namespace MessageCenterBridge
             if (prop != null && prop.CanWrite)
             {
                 prop.SetValue(target, value, null);
+            }
+        }
+    }
+
+    internal static class BridgePerfConfig
+    {
+        public static readonly string ConfigPath = Path.Combine(
+            Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData),
+            "taskbarAndAIbar",
+            "adaptive-topbar.json");
+
+        private static readonly Regex FastNotifRegex = new Regex(
+            "\"fast_notification_response\"\\s*:\\s*(true|false)",
+            RegexOptions.Compiled | RegexOptions.IgnoreCase);
+
+        private static readonly object Sync = new object();
+        private static DateTime _lastWriteUtc = DateTime.MinValue;
+        private static bool _cachedEnabled = true;
+
+        public static void InvalidateCache()
+        {
+            lock (Sync)
+            {
+                _lastWriteUtc = DateTime.MinValue;
+            }
+        }
+
+        public static bool IsFastNotificationEnabled()
+        {
+            try
+            {
+                if (!File.Exists(ConfigPath))
+                {
+                    return true;
+                }
+
+                DateTime mtime = File.GetLastWriteTimeUtc(ConfigPath);
+                lock (Sync)
+                {
+                    if (mtime == _lastWriteUtc)
+                    {
+                        return _cachedEnabled;
+                    }
+
+                    string text = File.ReadAllText(ConfigPath, Encoding.UTF8);
+                    Match m = FastNotifRegex.Match(text);
+                    _cachedEnabled = !m.Success || string.Equals(m.Groups[1].Value, "true", StringComparison.OrdinalIgnoreCase);
+                    _lastWriteUtc = mtime;
+                    return _cachedEnabled;
+                }
+            }
+            catch
+            {
+                return true;
+            }
+        }
+    }
+
+    /// <summary>
+    /// Eliminates Honor MessageCenterUI's idle/hide WorkingSet eviction (ReleaseMemory -> GC.Collect +
+    /// SetProcessWorkingSetSize(-1, -1) + MagicSpaceTurbo LIMIT_PROCESS_MEMORY), accelerates SlideIn/SlideOut
+    /// storyboards, and clears HIDE_COOLDOWN_MS / SECONDOPEN_DEBOUNCE_MS so notifications open instantly even
+    /// after hours of idle runtime.
+    /// </summary>
+    internal sealed class MessageCenterWindowOptimizer
+    {
+        private const uint UnlimitProcessMemoryMsg = 1002u;
+        private const double FastStoryboardSpeedRatio = 1000.0;
+
+        private static readonly ConditionalWeakTable<Window, MessageCenterWindowOptimizer> Attached =
+            new ConditionalWeakTable<Window, MessageCenterWindowOptimizer>();
+
+        private readonly Window _window;
+        private readonly bool _isMainWindowAi;
+        private readonly Storyboard _slideInStoryboard;
+        private readonly Storyboard _slideOutStoryboard;
+        private readonly double _origSlideInSpeedRatio = 1.0;
+        private readonly double _origSlideOutSpeedRatio = 1.0;
+
+        private readonly EventHandler _origContentRenderedDelegate;
+        private readonly EventHandler _origSlideOutCompletedDelegate;
+        private readonly DispatcherTimer _hideFallbackTimer;
+        private readonly DispatcherTimer _inactiveHideTimer;
+        private readonly EventHandler _origHideFallbackTickDelegate;
+
+        private readonly FieldInfo _windowHideTimeField;
+        private readonly FieldInfo _lastSecondOpenTimeField;
+        private readonly FieldInfo _isWindowHidingField;
+        private readonly FieldInfo _hideCompletionHandledField;
+        private readonly FieldInfo _providerField;
+        private readonly MethodInfo _hideProviderMethod;
+        private readonly FieldInfo _groupTipsMessageField;
+        private readonly MethodInfo _syncRespToTipsPluginMethod;
+        private readonly MethodInfo _commonVmGetInstanceMethod;
+        private readonly MethodInfo _commonVmSetUiReplyMethod;
+        private readonly object _statusChangeReplyEventVal;
+        private readonly MethodInfo _postStorageMessageMethod;
+
+        private bool _contentRenderedDetached;
+        private bool _slideOutDetached;
+        private bool _hideFallbackDetached;
+        private FileSystemWatcher _configWatcher;
+        private Timer _startupUnlimitTimer;
+
+        private MessageCenterWindowOptimizer(Window window)
+        {
+            _window = window;
+            Type winType = window.GetType();
+            _isMainWindowAi = string.Equals(winType.FullName, "MessageCenterUI.MainWindowAI", StringComparison.Ordinal);
+
+            const BindingFlags flags = BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Instance | BindingFlags.Static;
+
+            MethodInfo crMethod = winType.GetMethod("Window_ContentRendered", flags);
+            if (crMethod != null)
+            {
+                _origContentRenderedDelegate = (EventHandler)Delegate.CreateDelegate(
+                    typeof(EventHandler), _window, crMethod, false);
+            }
+
+            Assembly entryAsm = winType.Assembly;
+            Type uiCommonType = entryAsm.GetType("MessageCenterUI.Common.UICommonTools");
+            if (uiCommonType != null)
+            {
+                _postStorageMessageMethod = uiCommonType.GetMethod("PostStorageMessage", flags);
+            }
+
+            if (_isMainWindowAi)
+            {
+                _windowHideTimeField = winType.GetField("windowHideTime", flags);
+                _lastSecondOpenTimeField = winType.GetField("lastSecondOpenTime", flags);
+                _isWindowHidingField = winType.GetField("isWindowHiding", flags);
+                _hideCompletionHandledField = winType.GetField("hideCompletionHandled", flags);
+                _providerField = winType.GetField("_provider", flags);
+                _groupTipsMessageField = winType.GetField("groupTipsMessage", flags);
+
+                FieldInfo hfField = winType.GetField("hideFallbackTimer", flags);
+                if (hfField != null)
+                {
+                    _hideFallbackTimer = hfField.GetValue(_window) as DispatcherTimer;
+                }
+
+                FieldInfo ihField = winType.GetField("inactiveHideTimer", flags);
+                if (ihField != null)
+                {
+                    _inactiveHideTimer = ihField.GetValue(_window) as DispatcherTimer;
+                }
+
+                MethodInfo hfTickMethod = winType.GetMethod("HideFallbackTimer_Tick", flags);
+                if (_hideFallbackTimer != null && hfTickMethod != null)
+                {
+                    _origHideFallbackTickDelegate = (EventHandler)Delegate.CreateDelegate(
+                        typeof(EventHandler), _window, hfTickMethod, false);
+                }
+
+                object prov = _providerField != null ? _providerField.GetValue(_window) : null;
+                if (prov != null)
+                {
+                    _hideProviderMethod = prov.GetType().GetMethod("HideWindow", flags);
+                }
+
+                Type gtmType = entryAsm.GetType("MessageCenterUI.View.Controls.GroupTipsMessage");
+                if (gtmType != null)
+                {
+                    _syncRespToTipsPluginMethod = gtmType.GetMethod("SyncRespToTipsPlugin", flags);
+                }
+
+                Type cvmType = entryAsm.GetType("MessageCenterUI.ViewModel.CommonVM");
+                Type replyEnumType = entryAsm.GetType("MessageCenterUI.ViewModel.CommonVM+WND_UI_REPLY_EVENT");
+                if (cvmType != null && replyEnumType != null)
+                {
+                    _commonVmGetInstanceMethod = cvmType.GetMethod("GetInstance", BindingFlags.Public | BindingFlags.Static);
+                    _commonVmSetUiReplyMethod = cvmType.GetMethod("SetUIReply", flags);
+                    _statusChangeReplyEventVal = Enum.ToObject(replyEnumType, 0);
+                }
+
+                _slideInStoryboard = _window.Resources["SlideInAnimation"] as Storyboard;
+                if (_slideInStoryboard != null)
+                {
+                    _origSlideInSpeedRatio = _slideInStoryboard.SpeedRatio;
+                }
+
+                _slideOutStoryboard = _window.Resources["SlideOutAnimation"] as Storyboard;
+                if (_slideOutStoryboard != null)
+                {
+                    _origSlideOutSpeedRatio = _slideOutStoryboard.SpeedRatio;
+                    MethodInfo soDone = winType.GetMethod("SlideOutAnimation_Completed", flags);
+                    if (soDone != null)
+                    {
+                        _origSlideOutCompletedDelegate = (EventHandler)Delegate.CreateDelegate(
+                            typeof(EventHandler), _window, soDone, false);
+                    }
+                    _slideOutStoryboard.Completed += OnFastSlideOutCompleted;
+                }
+            }
+
+            _window.IsVisibleChanged += OnWindowIsVisibleChanged;
+            _window.Closed += OnWindowClosed;
+
+            StartConfigWatcher();
+            ApplyLiveSettings();
+
+            if (BridgePerfConfig.IsFastNotificationEnabled())
+            {
+                UnlimitProcessMemory();
+                ResetCooldowns();
+                // Re-send UNLIMIT once after startup init finishes (~1.5s) in case Honor /n init called HideWnd(false).
+                _startupUnlimitTimer = new Timer(delegate
+                {
+                    try
+                    {
+                        if (_window.Dispatcher != null && !_window.Dispatcher.HasShutdownStarted)
+                        {
+                            _window.Dispatcher.BeginInvoke(DispatcherPriority.Background, new Action(delegate
+                            {
+                                if (BridgePerfConfig.IsFastNotificationEnabled())
+                                {
+                                    UnlimitProcessMemory();
+                                    ResetCooldowns();
+                                }
+                            }));
+                        }
+                    }
+                    catch
+                    {
+                        // Ignore shutdown race.
+                    }
+                }, null, 1500, Timeout.Infinite);
+            }
+
+            BridgeLog.Info("MessageCenterWindowOptimizer attached to " + winType.Name + " (fast=" + BridgePerfConfig.IsFastNotificationEnabled() + ").");
+        }
+
+        public static void Attach(Window w)
+        {
+            if (w == null)
+            {
+                return;
+            }
+
+            MessageCenterWindowOptimizer existing;
+            if (Attached.TryGetValue(w, out existing))
+            {
+                existing.ApplyLiveSettings();
+                return;
+            }
+
+            Attached.GetValue(w, delegate { return new MessageCenterWindowOptimizer(w); });
+        }
+
+        private void ApplyLiveSettings()
+        {
+            bool fast = BridgePerfConfig.IsFastNotificationEnabled();
+
+            if (_origContentRenderedDelegate != null)
+            {
+                if (fast && !_contentRenderedDetached)
+                {
+                    _window.ContentRendered -= _origContentRenderedDelegate;
+                    _contentRenderedDetached = true;
+                }
+                else if (!fast && _contentRenderedDetached)
+                {
+                    _window.ContentRendered += _origContentRenderedDelegate;
+                    _contentRenderedDetached = false;
+                }
+            }
+
+            if (!_isMainWindowAi)
+            {
+                return;
+            }
+
+            try
+            {
+                if (_slideInStoryboard != null && !_slideInStoryboard.IsFrozen)
+                {
+                    double targetIn = fast ? FastStoryboardSpeedRatio : _origSlideInSpeedRatio;
+                    if (Math.Abs(_slideInStoryboard.SpeedRatio - targetIn) > 0.01)
+                    {
+                        _slideInStoryboard.SpeedRatio = targetIn;
+                    }
+                }
+
+                if (_slideOutStoryboard != null && !_slideOutStoryboard.IsFrozen)
+                {
+                    double targetOut = fast ? FastStoryboardSpeedRatio : _origSlideOutSpeedRatio;
+                    if (Math.Abs(_slideOutStoryboard.SpeedRatio - targetOut) > 0.01)
+                    {
+                        _slideOutStoryboard.SpeedRatio = targetOut;
+                    }
+
+                    if (_origSlideOutCompletedDelegate != null)
+                    {
+                        if (fast && !_slideOutDetached)
+                        {
+                            _slideOutStoryboard.Completed -= _origSlideOutCompletedDelegate;
+                            _slideOutDetached = true;
+                        }
+                        else if (!fast && _slideOutDetached)
+                        {
+                            _slideOutStoryboard.Completed += _origSlideOutCompletedDelegate;
+                            _slideOutDetached = false;
+                        }
+                    }
+                }
+
+                if (_hideFallbackTimer != null && _origHideFallbackTickDelegate != null)
+                {
+                    if (fast && !_hideFallbackDetached)
+                    {
+                        _hideFallbackTimer.Tick -= _origHideFallbackTickDelegate;
+                        _hideFallbackTimer.Tick += OnFastHideFallbackTick;
+                        _hideFallbackDetached = true;
+                    }
+                    else if (!fast && _hideFallbackDetached)
+                    {
+                        _hideFallbackTimer.Tick -= OnFastHideFallbackTick;
+                        _hideFallbackTimer.Tick += _origHideFallbackTickDelegate;
+                        _hideFallbackDetached = false;
+                    }
+                }
+            }
+            catch (Exception ex)
+            {
+                BridgeLog.Warn("MessageCenter ApplyLiveSettings failed: " + ex.Message);
+            }
+        }
+
+        private void OnFastSlideOutCompleted(object sender, EventArgs e)
+        {
+            if (BridgePerfConfig.IsFastNotificationEnabled() && _slideOutDetached)
+            {
+                CompleteHideWithoutReleaseMemory();
+            }
+        }
+
+        private void OnFastHideFallbackTick(object sender, EventArgs e)
+        {
+            if (_hideFallbackTimer != null)
+            {
+                _hideFallbackTimer.Stop();
+            }
+
+            if (BridgePerfConfig.IsFastNotificationEnabled() && _hideFallbackDetached)
+            {
+                CompleteHideWithoutReleaseMemory();
+            }
+        }
+
+        private void CompleteHideWithoutReleaseMemory()
+        {
+            try
+            {
+                if (_hideCompletionHandledField != null)
+                {
+                    object handled = _hideCompletionHandledField.GetValue(_window);
+                    if (handled is bool && (bool)handled)
+                    {
+                        return;
+                    }
+                    _hideCompletionHandledField.SetValue(_window, true);
+                }
+
+                if (_hideFallbackTimer != null)
+                {
+                    _hideFallbackTimer.Stop();
+                }
+
+                if (_inactiveHideTimer != null)
+                {
+                    _inactiveHideTimer.Stop();
+                }
+
+                object prov = _providerField != null ? _providerField.GetValue(_window) : null;
+                if (prov != null && _hideProviderMethod != null)
+                {
+                    _hideProviderMethod.Invoke(prov, null);
+                }
+
+                _window.Hide();
+                _window.Opacity = 1.0;
+
+                if (_isWindowHidingField != null)
+                {
+                    _isWindowHidingField.SetValue(_window, false);
+                }
+
+                ResetCooldowns();
+
+                if (_commonVmGetInstanceMethod != null && _commonVmSetUiReplyMethod != null && _statusChangeReplyEventVal != null)
+                {
+                    object cvm = _commonVmGetInstanceMethod.Invoke(null, null);
+                    if (cvm != null)
+                    {
+                        _commonVmSetUiReplyMethod.Invoke(cvm, new object[] { _statusChangeReplyEventVal, "0" });
+                    }
+                }
+
+                object gtm = _groupTipsMessageField != null ? _groupTipsMessageField.GetValue(_window) : null;
+                if (gtm != null && _syncRespToTipsPluginMethod != null)
+                {
+                    _syncRespToTipsPluginMethod.Invoke(gtm, null);
+                }
+
+                UnlimitProcessMemory();
+            }
+            catch (Exception ex)
+            {
+                BridgeLog.Warn("CompleteHideWithoutReleaseMemory failed: " + ex.Message);
+            }
+        }
+
+        private void OnWindowIsVisibleChanged(object sender, DependencyPropertyChangedEventArgs e)
+        {
+            if (!BridgePerfConfig.IsFastNotificationEnabled())
+            {
+                return;
+            }
+
+            ApplyLiveSettings();
+            ResetCooldowns();
+            UnlimitProcessMemory();
+            if (_window.IsVisible && _window.Opacity < 0.99)
+            {
+                _window.Opacity = 1.0;
+            }
+        }
+
+        private void ResetCooldowns()
+        {
+            if (!_isMainWindowAi)
+            {
+                return;
+            }
+
+            try
+            {
+                if (_windowHideTimeField != null)
+                {
+                    _windowHideTimeField.SetValue(_window, DateTime.MinValue);
+                }
+                if (_lastSecondOpenTimeField != null)
+                {
+                    _lastSecondOpenTimeField.SetValue(_window, DateTime.MinValue);
+                }
+            }
+            catch
+            {
+                // Ignore if field layout differs.
+            }
+        }
+
+        private void UnlimitProcessMemory()
+        {
+            try
+            {
+                if (_postStorageMessageMethod != null)
+                {
+                    _postStorageMessageMethod.Invoke(null, new object[] { UnlimitProcessMemoryMsg });
+                }
+            }
+            catch
+            {
+                // Best effort; MagicSpaceTurbo may not always be running in test hosts.
+            }
+        }
+
+        private void StartConfigWatcher()
+        {
+            try
+            {
+                string dir = Path.GetDirectoryName(BridgePerfConfig.ConfigPath) ?? string.Empty;
+                if (string.IsNullOrEmpty(dir))
+                {
+                    return;
+                }
+
+                Directory.CreateDirectory(dir);
+                _configWatcher = new FileSystemWatcher(dir, Path.GetFileName(BridgePerfConfig.ConfigPath))
+                {
+                    NotifyFilter = NotifyFilters.LastWrite | NotifyFilters.FileName | NotifyFilters.CreationTime
+                };
+                FileSystemEventHandler onChanged = delegate
+                {
+                    if (_window.Dispatcher != null && !_window.Dispatcher.HasShutdownStarted)
+                    {
+                        _window.Dispatcher.BeginInvoke(DispatcherPriority.Normal, new Action(delegate
+                        {
+                            BridgePerfConfig.InvalidateCache();
+                            ApplyLiveSettings();
+                            if (BridgePerfConfig.IsFastNotificationEnabled())
+                            {
+                                UnlimitProcessMemory();
+                                ResetCooldowns();
+                            }
+                        }));
+                    }
+                };
+                _configWatcher.Changed += onChanged;
+                _configWatcher.Created += onChanged;
+                _configWatcher.Renamed += delegate { onChanged(null, null); };
+                _configWatcher.EnableRaisingEvents = true;
+            }
+            catch
+            {
+                // Ignore if config dir watch fails.
+            }
+        }
+
+        private void OnWindowClosed(object sender, EventArgs e)
+        {
+            _window.IsVisibleChanged -= OnWindowIsVisibleChanged;
+            _window.Closed -= OnWindowClosed;
+
+            Timer st = Interlocked.Exchange(ref _startupUnlimitTimer, null);
+            if (st != null)
+            {
+                st.Dispose();
+            }
+
+            if (_origContentRenderedDelegate != null && _contentRenderedDetached)
+            {
+                _window.ContentRendered += _origContentRenderedDelegate;
+                _contentRenderedDetached = false;
+            }
+
+            if (_slideOutStoryboard != null)
+            {
+                _slideOutStoryboard.Completed -= OnFastSlideOutCompleted;
+                if (_slideOutDetached && !_slideOutStoryboard.IsFrozen && _origSlideOutCompletedDelegate != null)
+                {
+                    _slideOutStoryboard.Completed += _origSlideOutCompletedDelegate;
+                    _slideOutDetached = false;
+                }
+            }
+
+            if (_hideFallbackTimer != null)
+            {
+                _hideFallbackTimer.Tick -= OnFastHideFallbackTick;
+                if (_hideFallbackDetached && _origHideFallbackTickDelegate != null)
+                {
+                    _hideFallbackTimer.Tick += _origHideFallbackTickDelegate;
+                    _hideFallbackDetached = false;
+                }
+            }
+
+            if (_configWatcher != null)
+            {
+                _configWatcher.EnableRaisingEvents = false;
+                _configWatcher.Dispose();
+                _configWatcher = null;
             }
         }
     }

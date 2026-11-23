@@ -167,14 +167,18 @@ namespace ControlCenterSpeedBoost
         private readonly FieldInfo _compHolderField;
         private readonly MethodInfo _limitOrUnlimitMemoryMethod;
         private readonly MethodInfo _setWindowToPrimaryScreenMethod;
+        private readonly MethodInfo _toggleWndVisibleStateMethod;
         private readonly MethodInfo _showProviderMethod;
         private readonly MethodInfo _hideProviderMethod;
         private readonly Storyboard _showStoryboard;
         private readonly Storyboard _hideStoryboard;
+        private readonly EventHandler _origHideCompletedDelegate;
         private readonly double _origShowSpeedRatio = 1.0;
         private readonly double _origHideSpeedRatio = 1.0;
         private readonly KeyframeBackup[] _showOpacityKeyframes;
         private readonly DispatcherTimer _preWarmFinishTimer;
+
+        private bool _origHideHookDetached;
 
         private object _providerObj;
         private Window _compHolderWindow;
@@ -207,6 +211,7 @@ namespace ControlCenterSpeedBoost
             _isWndVisibleField = winType.GetField("isWndVisible", flags);
             _providerField = winType.GetField("_provider", flags);
             _setWindowToPrimaryScreenMethod = winType.GetMethod("SetWindowToPrimaryScreen", flags);
+            _toggleWndVisibleStateMethod = winType.GetMethod("ToggleWndVisibleState", flags);
 
             FieldInfo gridField = winType.GetField("gridWnd1", flags);
             _gridWnd1 = gridField != null ? gridField.GetValue(_window) as UIElement : null;
@@ -248,6 +253,12 @@ namespace ControlCenterSpeedBoost
             if (_hideStoryboard != null)
             {
                 _origHideSpeedRatio = _hideStoryboard.SpeedRatio;
+                MethodInfo origHideDone = winType.GetMethod("WndHideAction_Completed", flags);
+                if (origHideDone != null)
+                {
+                    _origHideCompletedDelegate = (EventHandler)Delegate.CreateDelegate(
+                        typeof(EventHandler), _window, origHideDone, false);
+                }
                 _hideStoryboard.Completed += OnHideStoryboardCompleted;
             }
 
@@ -859,6 +870,18 @@ namespace ControlCenterSpeedBoost
                 {
                     _lastHideTimeField.SetValue(_window, DateTime.MinValue);
                 }
+
+                if (_origHideHookDetached)
+                {
+                    if (_toggleWndVisibleStateMethod != null)
+                    {
+                        _toggleWndVisibleStateMethod.Invoke(_window, new object[] { "hide completed" });
+                    }
+                    else if (_isWndVisibleField != null)
+                    {
+                        _isWndVisibleField.SetValue(_window, false);
+                    }
+                }
             }
             catch
             {
@@ -951,6 +974,18 @@ namespace ControlCenterSpeedBoost
                     if (Math.Abs(_hideStoryboard.SpeedRatio - target) > 0.01)
                     {
                         _hideStoryboard.SpeedRatio = target;
+                    }
+
+                    if (fast && !_origHideHookDetached && _origHideCompletedDelegate != null)
+                    {
+                        _hideStoryboard.Completed -= _origHideCompletedDelegate;
+                        _origHideHookDetached = true;
+                        BoostLog.Info("Bypassed AiDesktopMainWindow.WndHideAction_Completed (ReleaseMemory/WorkingSet trim disabled).");
+                    }
+                    else if (!fast && _origHideHookDetached && _origHideCompletedDelegate != null)
+                    {
+                        _hideStoryboard.Completed += _origHideCompletedDelegate;
+                        _origHideHookDetached = false;
                     }
                 }
             }
@@ -1259,6 +1294,11 @@ namespace ControlCenterSpeedBoost
             if (_hideStoryboard != null)
             {
                 _hideStoryboard.Completed -= OnHideStoryboardCompleted;
+                if (_origHideHookDetached && !_hideStoryboard.IsFrozen && _origHideCompletedDelegate != null)
+                {
+                    _hideStoryboard.Completed += _origHideCompletedDelegate;
+                    _origHideHookDetached = false;
+                }
             }
             if (_configWatcher != null)
             {

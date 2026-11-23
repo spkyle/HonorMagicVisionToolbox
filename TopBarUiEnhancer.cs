@@ -117,6 +117,16 @@ namespace TopBarAdaptiveColor
         [return: MarshalAs(UnmanagedType.Bool)]
         private static extern bool AllowSetForegroundWindow(uint dwProcessId);
 
+        [DllImport("user32.dll", SetLastError = true)]
+        private static extern IntPtr SendMessageTimeoutW(
+            IntPtr hWnd,
+            uint Msg,
+            IntPtr wParam,
+            IntPtr lParam,
+            uint fuFlags,
+            uint uTimeout,
+            out IntPtr lpdwResult);
+
         public TopBarUiEnhancer(Window topBarWindow)
         {
             _window = topBarWindow ?? throw new ArgumentNullException(nameof(topBarWindow));
@@ -395,6 +405,57 @@ namespace TopBarAdaptiveColor
             {
                 ScheduleMessageCenterPrewarmIfNeeded();
             }
+
+            SyncHostWorkingSetTrimGuard(fastSettingsEnabled || fastNotifEnabled);
+        }
+
+        internal static void SyncHostWorkingSetTrimGuard(bool keepWarm)
+        {
+            try
+            {
+                Environment.SetEnvironmentVariable("MAGICTASKBAR_DISABLE_WORKING_SET_TRIM", keepWarm ? "1" : null);
+                if (!keepWarm)
+                {
+                    return;
+                }
+
+                Assembly? sharedAsm = null;
+                foreach (Assembly a in AppDomain.CurrentDomain.GetAssemblies())
+                {
+                    if (string.Equals(a.GetName().Name, "MagicTaskbar.Shared", StringComparison.OrdinalIgnoreCase))
+                    {
+                        sharedAsm = a;
+                        break;
+                    }
+                }
+
+                Type? arc = sharedAsm?.GetType("MagicTaskbarWpf.AppRuntimeCoordinator", throwOnError: false);
+                if (arc == null)
+                {
+                    return;
+                }
+
+                const BindingFlags flags = BindingFlags.Static | BindingFlags.Public | BindingFlags.NonPublic;
+                if (arc.GetField("_interactionTrimTimer", flags)?.GetValue(null) is DispatcherTimer itTimer && itTimer.IsEnabled)
+                {
+                    itTimer.Stop();
+                }
+
+                if (arc.GetField("WorkingSetTrimTimers", flags)?.GetValue(null) is System.Collections.IList timers)
+                {
+                    for (int i = 0; i < timers.Count; i++)
+                    {
+                        if (timers[i] is DispatcherTimer t && t.IsEnabled)
+                        {
+                            t.Stop();
+                        }
+                    }
+                }
+            }
+            catch
+            {
+                // Best-effort trim guard for host AppRuntimeCoordinator.
+            }
         }
 
         private void CloseOtherPopupSurfaces(int popupSurfaceValue)
@@ -637,7 +698,7 @@ namespace TopBarAdaptiveColor
             PrepareFastPopupOpen(PopupSurfaceNotification, _notificationTrackerField, clearNotificationBadge: true);
             RefreshNotificationAlertVisual(allowImmediateShake: false);
 
-            bool posted = TryPostMessageCenterSecondOpen(out int postedCount, out int candidateCount);
+            bool posted = TryPostMessageCenterSecondOpen(out int postedCount, out int candidateCount, out IntPtr targetHwnd);
             object? sysService = _systemServiceField?.GetValue(_window);
             MethodInfo? openMethod = _openMessageCenterMethod;
 
@@ -648,7 +709,31 @@ namespace TopBarAdaptiveColor
                     $"(posted={postedCount}, candidates={candidateCount}).");
                 Task.Run(async () =>
                 {
+                    // Allow responsive waking instances (including standby/paged-out recovery) up to 1500ms
+                    // instead of force-killing an alive UI thread after 350ms.
+                    const uint SmtoAbortIfHung = 0x0002;
+                    int waitedMs = 0;
                     await Task.Delay(350).ConfigureAwait(false);
+                    waitedMs += 350;
+                    while (waitedMs < 1500)
+                    {
+                        if (_disposed ||
+                            System.Threading.Volatile.Read(ref _notifToggleGeneration) != openGen ||
+                            HasVisibleMessageCenterWindow())
+                        {
+                            return;
+                        }
+
+                        if (targetHwnd != IntPtr.Zero &&
+                            SendMessageTimeoutW(targetHwnd, 0, IntPtr.Zero, IntPtr.Zero, SmtoAbortIfHung, 250, out _) == IntPtr.Zero)
+                        {
+                            break;
+                        }
+
+                        await Task.Delay(150).ConfigureAwait(false);
+                        waitedMs += 150;
+                    }
+
                     if (_disposed ||
                         System.Threading.Volatile.Read(ref _notifToggleGeneration) != openGen ||
                         HasVisibleMessageCenterWindow())
@@ -657,7 +742,7 @@ namespace TopBarAdaptiveColor
                     }
 
                     DiagnosticLog.Warn(
-                        $"MessageCenterUI did not become visible after WM_SECONDOPEN (candidates={candidateCount}); " +
+                        $"MessageCenterUI did not become visible after WM_SECONDOPEN (candidates={candidateCount}, waited={waitedMs}ms); " +
                         "recovering unresponsive instance and launching fresh fallback.");
                     KillUnresponsiveMessageCenterProcesses();
                     LaunchMessageCenterFallback(sysService, openMethod);
@@ -782,10 +867,14 @@ namespace TopBarAdaptiveColor
             }
         }
 
-        internal static bool TryPostMessageCenterSecondOpen(out int postedCount, out int candidateCount)
+        internal static bool TryPostMessageCenterSecondOpen(out int postedCount, out int candidateCount) =>
+            TryPostMessageCenterSecondOpen(out postedCount, out candidateCount, out _);
+
+        internal static bool TryPostMessageCenterSecondOpen(out int postedCount, out int candidateCount, out IntPtr targetHwnd)
         {
             postedCount = 0;
             candidateCount = 0;
+            targetHwnd = IntPtr.Zero;
 
             IntPtr bestHwnd = IntPtr.Zero;
             int bestHeight = -1;
@@ -828,6 +917,7 @@ namespace TopBarAdaptiveColor
                 postedCount = 1;
             }
 
+            targetHwnd = bestHwnd;
             return postedCount > 0;
         }
 

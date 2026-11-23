@@ -62,6 +62,13 @@ public static class StartupHook
     {
         TopBarAdaptiveColor.DiagnosticLog.Info("StartupHook.Initialize entered.");
 
+        if (TopBarAdaptiveColor.AdaptiveSettingsStore.IsFastSettingsResponseEnabled ||
+            TopBarAdaptiveColor.AdaptiveSettingsStore.IsFastNotificationResponseEnabled)
+        {
+            Environment.SetEnvironmentVariable("MAGICTASKBAR_DISABLE_WORKING_SET_TRIM", "1");
+            TopBarAdaptiveColor.DiagnosticLog.Info("Set MAGICTASKBAR_DISABLE_WORKING_SET_TRIM=1 before host startup.");
+        }
+
         // Poll lightly until HostApp has loaded PresentationFramework and MagicTaskbar.TopBar.
         // Avoid touching any WPF type before PresentationFramework is loaded by the host.
         _bootstrapTimer = new Timer(_ => TryAttachWhenReady(), null, 100, 150);
