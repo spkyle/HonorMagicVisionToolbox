@@ -229,7 +229,8 @@ namespace TopBarAdaptiveColor
             _bridgeCoordinator = new StatusNotificationBridgeCoordinator(
                 topBarWindow,
                 _statusItemsControl,
-                () => RefreshNotificationAlertVisual(allowImmediateShake: true));
+                () => RefreshNotificationAlertVisual(allowImmediateShake: true),
+                onActivateBridgedRecord: OnBridgedNotificationActivated);
             RefreshNotificationAlertVisual(allowImmediateShake: false);
 
             DiagnosticLog.Info(
@@ -245,6 +246,12 @@ namespace TopBarAdaptiveColor
             {
                 return !_everAttachedToTopBar || ActiveInstances.Count > 0;
             }
+        }
+
+        private static void OnBridgedNotificationActivated(BridgedNotificationRecord record)
+        {
+            DiagnosticLog.Info($"Relaying bridged card click activation: app='{record.DisplayName}' proc='{record.ProcessName}'.");
+            _ = HiddenTrayPinEnhancer.ActivateAppViaTrayOrLaunchAsync(record.LaunchPath, record.ProcessName, record.DisplayName);
         }
 
         private void OnYoyoClawSettingChanged(bool _)

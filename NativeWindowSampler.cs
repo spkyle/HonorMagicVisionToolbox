@@ -47,6 +47,18 @@ namespace TopBarAdaptiveColor
 
         private static readonly int CurrentPid = Environment.ProcessId;
 
+        [ThreadStatic]
+        private static byte[]? _samplePixelBuffer;
+
+        [ThreadStatic]
+        private static Dictionary<int, (int Count, long SumR, long SumG, long SumB)>? _sampleBucketScratch;
+
+        [ThreadStatic]
+        private static int[]? _sampleRows2Scratch;
+
+        [ThreadStatic]
+        private static int[]? _sampleRows3Scratch;
+
         private static readonly HashSet<string> IgnoredClasses = new(StringComparer.OrdinalIgnoreCase)
         {
             "Progman",
@@ -454,17 +466,36 @@ namespace TopBarAdaptiveColor
                 }
 
                 int strideBytes = width * 4;
-                byte[] pixels = new byte[strideBytes * height];
-                Marshal.Copy(bitsPtr, pixels, 0, pixels.Length);
+                int requiredBytes = strideBytes * height;
+                byte[] pixels = _samplePixelBuffer != null && _samplePixelBuffer.Length >= requiredBytes
+                    ? _samplePixelBuffer
+                    : (_samplePixelBuffer = new byte[requiredBytes]);
+                Marshal.Copy(bitsPtr, pixels, 0, requiredBytes);
 
                 // Pick up to 64 evenly spaced columns, excluding occluded x positions.
                 const int targetCols = 64;
                 int step = Math.Max(1, width / targetCols);
 
                 // Quantized 5-bit RGB bucket -> (count, sumR, sumG, sumB)
-                var buckets = new Dictionary<int, (int Count, long SumR, long SumG, long SumB)>(32);
+                Dictionary<int, (int Count, long SumR, long SumG, long SumB)> buckets =
+                    _sampleBucketScratch ??= new Dictionary<int, (int Count, long SumR, long SumG, long SumB)>(32);
+                buckets.Clear();
+
                 int rowMid = height / 2;
-                int[] rows = height >= 3 ? new[] { 0, rowMid, height - 1 } : new[] { 0, height - 1 };
+                int[] rows;
+                if (height >= 3)
+                {
+                    rows = _sampleRows3Scratch ??= new int[3];
+                    rows[0] = 0;
+                    rows[1] = rowMid;
+                    rows[2] = height - 1;
+                }
+                else
+                {
+                    rows = _sampleRows2Scratch ??= new int[2];
+                    rows[0] = 0;
+                    rows[1] = height - 1;
+                }
 
                 int totalSamples = 0;
                 for (int localX = 0; localX < width; localX += step)

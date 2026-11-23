@@ -115,6 +115,8 @@ namespace TopBarAdaptiveColor
         private Color? _currentTargetColor;
         private IntPtr _lastMatchedHwnd;
         private long _lastFullscreenRecoverTick;
+        private long _lastDarkForegroundTreeSyncTick;
+        private const long DarkForegroundTreeSyncIntervalMs = 1500;
         private int _burstRemaining;
         private double _baseWindowHeightDip = DefaultTopBarHeightDip;
         private double _origWindowHeight = double.NaN;
@@ -739,11 +741,18 @@ namespace TopBarAdaptiveColor
             {
                 _useDarkForeground = nextDark;
                 ApplyForegroundTheme(nextDark);
+                _lastDarkForegroundTreeSyncTick = Environment.TickCount64;
             }
             else if (_useDarkForeground && _inputRoot != null)
             {
-                // Keep dynamically updated icons/text synced on light backgrounds.
-                ApplyForegroundToVisualTree(_inputRoot, true);
+                long nowTick = Environment.TickCount64;
+                if (nowTick - _lastDarkForegroundTreeSyncTick >= DarkForegroundTreeSyncIntervalMs)
+                {
+                    _lastDarkForegroundTreeSyncTick = nowTick;
+                    // Periodically catch late-updated icons/text on light backgrounds; dynamic item
+                    // containers already sync immediately in OnItemsContainerStatusChanged.
+                    ApplyForegroundToVisualTree(_inputRoot, true);
+                }
             }
         }
 
@@ -759,6 +768,7 @@ namespace TopBarAdaptiveColor
             _isMatched = false;
             _lastMatchedHwnd = IntPtr.Zero;
             _currentTargetColor = null;
+            _lastDarkForegroundTreeSyncTick = 0;
 
             if (_useDarkForeground)
             {

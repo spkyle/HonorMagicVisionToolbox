@@ -126,7 +126,7 @@ namespace TopBarAdaptiveColor
                 ? Math.Clamp(left, minLeft, maxLeft)
                 : minLeft;
 
-            double minTop = workDip.Top + 2.0;
+            double minTop = workDip.Top;
             double maxTop = workDip.Bottom - height - EdgePaddingDip;
             double targetTop = maxTop >= minTop
                 ? Math.Clamp(top, minTop, maxTop)

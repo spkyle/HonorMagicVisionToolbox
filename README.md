@@ -4,6 +4,7 @@
 
 - 项目仓库：https://github.com/spkyle/HonorMagicVisionToolbox
 - 发行版本：https://github.com/spkyle/HonorMagicVisionToolbox/releases/latest
+- 更新日志：[CHANGELOG.md](CHANGELOG.md)
 
 本工具通过 .NET 6 `STARTUP_HOOKS` 与 .NET Framework 4.8 `AppDomainManager` 在进程启动时按需加载，不修改官方程序集文件及数字签名。所有功能均可在 **Magic 视界设置 →「Magic 视界工具箱」** 中独立开关或卸载。
 
@@ -57,8 +58,8 @@
     相关按钮切换为 `ClickMode.Press`（按下即触发）、设置窗口改为 `Hide()` 热复用，挂载 `.NET 4.8 AppDomainManager` 离屏预热控制中心与可视树、取消防连点冷却、关闭隐藏时的工作集强制清出（跳过 `ReleaseMemory` 与 `MagicSpaceTurbo` 限流），同时通过 `MAGICTASKBAR_DISABLE_WORKING_SET_TRIM=1` 阻止顶栏进程在后台定时清出工作集，避免长时间运行后再次卡顿；同步模糊背景与控件首帧显示并支持再次点击右上角控制中心图标收起面板。
 13. **通知按钮快速响应、假死恢复与再点收起**  
     按下通知按钮时直接通过 `WM_SECONDOPEN`（`0x0800`）唤醒常驻的 `MessageCenterUI`（使用 `SendMessageTimeout` 探测真实响应状态后再决定是否重建），同时在通知中心侧跳过隐藏/渲染后的 `ReleaseMemory` 工作集清出、加速滑入/滑出动画并重置二次点击冷却，避免长时间挂起后重新打开通知卡顿；再次点击通知图标可发送失活消息收起通知中心。
-    - **二级开关 · 秒开省内存 · 软件渲染降占**（默认关闭）：可单独或叠加开启。开启后控制中心与通知中心改用 WPF 软件渲染（`RenderMode.SoftwareOnly`），降低 GPU 渲染缓冲占用；默认关闭时保持硬件渲染最流畅。
-    - **二级开关 · 秒开省内存 · 闲置自动释放工作集**（默认关闭）：可单独或叠加开启。开启后解除顶栏裁剪锁并允许回收托管垃圾，弹窗隐藏闲置 3 分钟后压缩工作集大幅降低常驻内存占用（久置后首次点开可能有短暂缺页微顿）；默认关闭时保持热内存常驻最流畅。
+    - **二级开关 · 秒开省内存 · 软件渲染降占**（默认开启）：可单独关闭或与下方闲置释放叠加。开启后控制中心与通知中心改用 WPF 软件渲染（`RenderMode.SoftwareOnly`），减少约 `130+ MB` GPU 渲染缓冲占用；关闭后可恢复 GPU 硬件加速。
+    - **二级开关 · 秒开省内存 · 闲置自动释放工作集**（默认开启）：可单独关闭或与软件渲染叠加。开启后解除顶栏裁剪锁并允许回收托管垃圾，弹窗隐藏闲置 3 分钟后压缩工作集大幅降低常驻内存占用（久置后首次点开可能有短暂缺页微顿）；关闭后可保持热内存常驻最流畅。
 14. **允许压力触控板三指轻触打开智慧搜索**  
     同步读写 `HKCU\SOFTWARE\PCManager\TouchPadSetting` 并向 Goodix ForcePad HID 下发控制报文，支持单独关闭三指轻触触发「智慧搜索」而不影响三指拖拽与其他多指手势。
 

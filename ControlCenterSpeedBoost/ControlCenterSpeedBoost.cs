@@ -143,6 +143,7 @@ namespace ControlCenterSpeedBoost
         private const double FastShowStoryboardSpeedRatio = 1000.0;
         private const double FastHideStoryboardSpeedRatio = 1000.0;
         private const uint BeforeShowCooldownMs = 1500;
+        private const uint TrustCirclePollCooldownMs = 60000;
         // Long enough for TrustCircleView's async DealGetOnlineDevices IPC (~220ms) to resize
         // the bottom card while still DWM-cloaked & off-screen before the first user click.
         private const int PreWarmDurationMs = 340;
@@ -198,6 +199,9 @@ namespace ControlCenterSpeedBoost
         private bool _hasInitialBeforeShow;
         private bool _hasLastBeforeShowTick;
         private int _lastBeforeShowTick;
+        private bool _hasInitialTrustCircleShow;
+        private int _lastTrustCircleTick;
+        private bool _compHolderUncloakQueued;
         private bool _isPreWarmed;
         private bool _isPreWarming;
         private bool _insidePreWarmShow;
@@ -746,17 +750,11 @@ namespace ControlCenterSpeedBoost
             if (e.NewValue is bool && (bool)e.NewValue)
             {
                 EnsureShowReadyOpacity();
-                if (!_window.IsVisible || !_windowFrameRendered)
+                if (!_window.IsVisible || !_windowFrameRendered || _deferredRefreshQueued)
                 {
                     // Prevent the acrylic backdrop window from appearing a frame ahead of MainWindow buttons.
                     TrySetWindowCloaked(_compHolderWindow, true);
-                    _window.Dispatcher.BeginInvoke(DispatcherPriority.Input, new Action(delegate
-                    {
-                        if (!_isPreWarming && _compHolderWindow != null && _compHolderWindow.IsVisible)
-                        {
-                            TrySetWindowCloaked(_compHolderWindow, false);
-                        }
-                    }));
+                    ScheduleCompHolderUncloakAfterRender();
                 }
                 return;
             }
@@ -764,6 +762,7 @@ namespace ControlCenterSpeedBoost
             if (e.NewValue is bool && !(bool)e.NewValue)
             {
                 _windowFrameRendered = false;
+                _compHolderUncloakQueued = false;
                 // Hide main window before resetting opacity so the next open never shows a transparent
                 // frame over the blur backdrop while waiting for VisibilityChanged to restore Opacity.
                 try
@@ -811,36 +810,31 @@ namespace ControlCenterSpeedBoost
                     StopStoryboardSafely(_hideStoryboard);
                 }
                 EnsureShowReadyOpacity();
-                TrySetWindowCloaked(_window, false);
 
-                if (fast && _compHolderWindow != null)
+                if (fast && (!_windowFrameRendered || _deferredRefreshQueued))
                 {
-                    if (!_windowFrameRendered)
+                    TrySetWindowCloaked(_window, true);
+                    if (_compHolderWindow != null)
                     {
                         TrySetWindowCloaked(_compHolderWindow, true);
-                        _window.Dispatcher.BeginInvoke(DispatcherPriority.Render, new Action(delegate
-                        {
-                            _windowFrameRendered = true;
-                            if (!_isPreWarming)
-                            {
-                                TrySetWindowCloaked(_compHolderWindow, false);
-                            }
-                        }));
                     }
-                    else
-                    {
-                        TrySetWindowCloaked(_compHolderWindow, false);
-                    }
+                    ScheduleCompHolderUncloakAfterRender();
                 }
                 else
                 {
-                    _windowFrameRendered = true;
-                    TrySetWindowCloaked(_compHolderWindow, false);
+                    TrySetWindowCloaked(_window, false);
+                    if (fast && _compHolderWindow != null)
+                    {
+                        TrySetWindowCloaked(_compHolderWindow, false);
+                    }
                 }
             }
             else if (e.NewValue is bool && !(bool)e.NewValue)
             {
                 _windowFrameRendered = false;
+                _compHolderUncloakQueued = false;
+                TrySetWindowCloaked(_window, false);
+                TrySetWindowCloaked(_compHolderWindow, false);
                 if (!fast)
                 {
                     StopStoryboardSafely(_showStoryboard);
@@ -1265,6 +1259,10 @@ namespace ControlCenterSpeedBoost
                 _deferredRefreshQueued = false;
                 if (!BoostConfig.IsFastResponseEnabled() || _wrappedSubscribers == null || _isRunningBeforeShow)
                 {
+                    if (_window.IsVisible && !_isPreWarming)
+                    {
+                        ScheduleCompHolderUncloakAfterRender();
+                    }
                     return;
                 }
 
@@ -1278,6 +1276,30 @@ namespace ControlCenterSpeedBoost
                 finally
                 {
                     _isRunningBeforeShow = false;
+                    if (_window.IsVisible && !_isPreWarming)
+                    {
+                        ScheduleCompHolderUncloakAfterRender();
+                    }
+                }
+            }));
+        }
+
+        private void ScheduleCompHolderUncloakAfterRender()
+        {
+            if (_compHolderUncloakQueued || _deferredRefreshQueued || _window.Dispatcher == null || _window.Dispatcher.HasShutdownStarted)
+            {
+                return;
+            }
+
+            _compHolderUncloakQueued = true;
+            _window.Dispatcher.BeginInvoke(DispatcherPriority.Render, new Action(delegate
+            {
+                _compHolderUncloakQueued = false;
+                if (!_isPreWarming && _window.IsVisible)
+                {
+                    _windowFrameRendered = true;
+                    TrySetWindowCloaked(_window, false);
+                    TrySetWindowCloaked(_compHolderWindow, false);
                 }
             }));
         }
@@ -1305,6 +1327,26 @@ namespace ControlCenterSpeedBoost
             }
         }
 
+        private static bool IsTrustCircleSubscriber(Delegate d)
+        {
+            try
+            {
+                MethodInfo mi = d != null ? d.Method : null;
+                Type dt = mi != null ? mi.DeclaringType : null;
+                if (dt != null && dt.FullName != null &&
+                    dt.FullName.IndexOf("TrustCircle", StringComparison.OrdinalIgnoreCase) >= 0)
+                {
+                    return true;
+                }
+                return mi != null && mi.Name != null &&
+                    mi.Name.IndexOf("TrustCircle", StringComparison.OrdinalIgnoreCase) >= 0;
+            }
+            catch
+            {
+                return false;
+            }
+        }
+
         private void InvokeWrappedSubscribers()
         {
             Delegate subs = _wrappedSubscribers;
@@ -1313,12 +1355,28 @@ namespace ControlCenterSpeedBoost
                 return;
             }
 
+            bool throttleTrustCircle = !_isPreWarming && BoostConfig.IsFastResponseEnabled();
             Delegate[] list = subs.GetInvocationList();
             for (int i = 0; i < list.Length; i++)
             {
+                Delegate d = list[i];
+                if (throttleTrustCircle && IsTrustCircleSubscriber(d) && _hasInitialTrustCircleShow)
+                {
+                    uint tcElapsed = unchecked((uint)Environment.TickCount - (uint)_lastTrustCircleTick);
+                    if (tcElapsed < TrustCirclePollCooldownMs)
+                    {
+                        continue;
+                    }
+                }
+
                 try
                 {
-                    list[i].DynamicInvoke();
+                    d.DynamicInvoke();
+                    if (IsTrustCircleSubscriber(d))
+                    {
+                        _hasInitialTrustCircleShow = true;
+                        _lastTrustCircleTick = Environment.TickCount;
+                    }
                 }
                 catch (Exception ex)
                 {
@@ -1451,8 +1509,8 @@ namespace ControlCenterSpeedBoost
         private static readonly object Sync = new object();
         private static DateTime _lastWriteUtc = DateTime.MinValue;
         private static bool _cachedEnabled = true;
-        private static bool _cachedSoftwareRendering;
-        private static bool _cachedIdleTrim;
+        private static bool _cachedSoftwareRendering = true;
+        private static bool _cachedIdleTrim = true;
 
         public static void InvalidateCache()
         {
@@ -1519,8 +1577,8 @@ namespace ControlCenterSpeedBoost
                     lock (Sync)
                     {
                         _cachedEnabled = true;
-                        _cachedSoftwareRendering = false;
-                        _cachedIdleTrim = false;
+                        _cachedSoftwareRendering = true;
+                        _cachedIdleTrim = true;
                         _lastWriteUtc = DateTime.MinValue;
                     }
                     return;
@@ -1536,8 +1594,8 @@ namespace ControlCenterSpeedBoost
 
                     string text = File.ReadAllText(ConfigPath, Encoding.UTF8);
                     _cachedEnabled = ParseFlag(text, FastSettingRegex, true);
-                    _cachedSoftwareRendering = ParseFlag(text, SoftwareRenderingRegex, false);
-                    _cachedIdleTrim = ParseFlag(text, IdleTrimRegex, false);
+                    _cachedSoftwareRendering = ParseFlag(text, SoftwareRenderingRegex, true);
+                    _cachedIdleTrim = ParseFlag(text, IdleTrimRegex, true);
                     _lastWriteUtc = mtime;
                 }
             }
@@ -1546,8 +1604,8 @@ namespace ControlCenterSpeedBoost
                 lock (Sync)
                 {
                     _cachedEnabled = true;
-                    _cachedSoftwareRendering = false;
-                    _cachedIdleTrim = false;
+                    _cachedSoftwareRendering = true;
+                    _cachedIdleTrim = true;
                 }
             }
         }

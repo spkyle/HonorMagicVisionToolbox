@@ -89,6 +89,9 @@ namespace TopBarAdaptiveColor
 
         [JsonPropertyName("action")]
         public string Action { get; set; } = string.Empty;
+
+        [JsonPropertyName("handled")]
+        public bool Handled { get; set; }
     }
 
     /// <summary>
@@ -149,11 +152,14 @@ namespace TopBarAdaptiveColor
         private readonly Window _topBarWindow;
         private readonly ItemsControl? _itemsControl;
         private readonly Action _onAlertStateChanged;
+        private readonly Action<BridgedNotificationRecord>? _onActivateBridgedRecord;
         private readonly string _tempDir;
         private readonly string _statePath;
         private readonly string _ackPath;
         private readonly string _iconsDir;
         private readonly Dictionary<string, EpisodeState> _episodes = new(StringComparer.Ordinal);
+        private readonly Dictionary<string, long> _activatedEpisodes = new(StringComparer.Ordinal);
+        private readonly Dictionary<string, BridgedNotificationRecord> _lastRecordsByGuid = new(StringComparer.Ordinal);
         private readonly Dictionary<object, INotifyPropertyChanged> _hookedItems = new();
         private readonly Dictionary<Type, ItemAccessor> _accessors = new();
         private readonly uint _syncMsgId;
@@ -162,6 +168,9 @@ namespace TopBarAdaptiveColor
         private HwndSource? _hwndSource;
         private HwndSourceHook? _hwndHook;
         private string? _lastPublishedPayloadKey;
+        private Dictionary<string, BridgedNotificationAckEntry> _cachedAckEntries = new(StringComparer.Ordinal);
+        private DateTime _cachedAckWriteUtc = DateTime.MinValue;
+        private long _cachedAckLength = -1;
         private long _generation;
         private bool _disposed;
 
@@ -201,11 +210,13 @@ namespace TopBarAdaptiveColor
             Window topBarWindow,
             ItemsControl? itemsControl,
             Action onAlertStateChanged,
-            string? customTempDir = null)
+            string? customTempDir = null,
+            Action<BridgedNotificationRecord>? onActivateBridgedRecord = null)
         {
             _topBarWindow = topBarWindow ?? throw new ArgumentNullException(nameof(topBarWindow));
             _itemsControl = itemsControl;
             _onAlertStateChanged = onAlertStateChanged ?? throw new ArgumentNullException(nameof(onAlertStateChanged));
+            _onActivateBridgedRecord = onActivateBridgedRecord;
             _tempDir = string.IsNullOrWhiteSpace(customTempDir) ? DefaultTempDir : customTempDir;
             _statePath = Path.Combine(_tempDir, "bridged-notifications.json");
             _ackPath = Path.Combine(_tempDir, "bridged-notifications-ack.json");
@@ -240,7 +251,9 @@ namespace TopBarAdaptiveColor
             }
         }
 
-        public bool Sync(bool notifyOnChange = true)
+        public bool Sync(bool notifyOnChange = true) => SyncCore(notifyOnChange, forceReadAck: false);
+
+        private bool SyncCore(bool notifyOnChange, bool forceReadAck)
         {
             if (_disposed)
             {
@@ -251,7 +264,7 @@ namespace TopBarAdaptiveColor
 
             bool enabled = AdaptiveSettingsStore.IsNotificationAlertAnimationEnabled;
             long nowMs = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
-            var ackMap = ReadAckMap(_ackPath);
+            Dictionary<string, BridgedNotificationAckEntry> ackEntries = ReadAckEntriesCached(forceReadAck);
             var seenGuids = new HashSet<string>(StringComparer.Ordinal);
             var activeRecords = new List<BridgedNotificationRecord>();
 
@@ -273,8 +286,6 @@ namespace TopBarAdaptiveColor
                     string? appId = acc.AppIdProp?.GetValue(item) as string;
                     string? displayName = acc.DisplayNameProp?.GetValue(item) as string;
                     string? launchPath = acc.LaunchPathProp?.GetValue(item) as string;
-                    Uri? bitmapUri = acc.BitmapIconUriProp?.GetValue(item) as Uri;
-                    Uri? iconUri = acc.IconUriProp?.GetValue(item) as Uri;
                     IntPtr targetHwnd = acc.UnreadWindowHandleProp?.GetValue(item) is IntPtr hwnd ? hwnd : IntPtr.Zero;
 
                     string appKey = BuildAppKey(appId, displayName, launchPath);
@@ -290,10 +301,45 @@ namespace TopBarAdaptiveColor
                         _episodes[guid] = ep;
                     }
 
-                    if (ackMap.TryGetValue(guid, out long ackedEp) && ackedEp == ep.EpisodeId)
+                    long targetHwndValue = targetHwnd.ToInt64();
+                    if (!_lastRecordsByGuid.TryGetValue(guid, out BridgedNotificationRecord? record) ||
+                        record.EpisodeId != ep.EpisodeId ||
+                        record.TargetHwnd != targetHwndValue)
+                    {
+                        Uri? bitmapUri = acc.BitmapIconUriProp?.GetValue(item) as Uri;
+                        Uri? iconUri = acc.IconUriProp?.GetValue(item) as Uri;
+                        string name = !string.IsNullOrWhiteSpace(displayName)
+                            ? displayName.Trim()
+                            : (!string.IsNullOrWhiteSpace(appId) ? appId.Trim() : appKey);
+
+                        string processName = !string.IsNullOrWhiteSpace(launchPath)
+                            ? Path.GetFileNameWithoutExtension(launchPath)
+                            : string.Empty;
+
+                        string iconPath = ResolveCachedIconPngPath(appKey, bitmapUri, iconUri, launchPath);
+                        record = new BridgedNotificationRecord
+                        {
+                            Guid = guid,
+                            AppKey = appKey,
+                            DisplayName = name,
+                            Title = name + " 有新消息",
+                            Description = "点击跳转查看未读消息",
+                            IconPath = iconPath,
+                            TargetHwnd = targetHwndValue,
+                            LaunchPath = launchPath ?? string.Empty,
+                            ProcessName = processName,
+                            TimestampMs = ep.TimestampMs,
+                            EpisodeId = ep.EpisodeId
+                        };
+                        _lastRecordsByGuid[guid] = record;
+                    }
+
+                    if (ackEntries.TryGetValue(guid, out BridgedNotificationAckEntry? ackEntry) &&
+                        ackEntry.EpisodeId == ep.EpisodeId)
                     {
                         ep.CardDismissed = true;
                         ep.BellAcked = true;
+                        TryDispatchAckActivation(guid, ackEntry, record);
                     }
 
                     if (!enabled || ep.CardDismissed)
@@ -301,30 +347,7 @@ namespace TopBarAdaptiveColor
                         continue;
                     }
 
-                    string name = !string.IsNullOrWhiteSpace(displayName)
-                        ? displayName.Trim()
-                        : (!string.IsNullOrWhiteSpace(appId) ? appId.Trim() : appKey);
-
-                    string processName = !string.IsNullOrWhiteSpace(launchPath)
-                        ? Path.GetFileNameWithoutExtension(launchPath)
-                        : string.Empty;
-
-                    string iconPath = ResolveCachedIconPngPath(appKey, bitmapUri, iconUri, launchPath);
-
-                    activeRecords.Add(new BridgedNotificationRecord
-                    {
-                        Guid = guid,
-                        AppKey = appKey,
-                        DisplayName = name,
-                        Title = name + " 有新消息",
-                        Description = "点击跳转查看未读消息",
-                        IconPath = iconPath,
-                        TargetHwnd = targetHwnd.ToInt64(),
-                        LaunchPath = launchPath ?? string.Empty,
-                        ProcessName = processName,
-                        TimestampMs = ep.TimestampMs,
-                        EpisodeId = ep.EpisodeId
-                    });
+                    activeRecords.Add(record);
                 }
             }
 
@@ -335,6 +358,13 @@ namespace TopBarAdaptiveColor
                 {
                     if (!seenGuids.Contains(existingGuid))
                     {
+                        if (ackEntries.TryGetValue(existingGuid, out BridgedNotificationAckEntry? ackEntry) &&
+                            _lastRecordsByGuid.TryGetValue(existingGuid, out BridgedNotificationRecord? cachedRecord) &&
+                            ackEntry.EpisodeId == cachedRecord.EpisodeId)
+                        {
+                            TryDispatchAckActivation(existingGuid, ackEntry, cachedRecord);
+                        }
+
                         clearedGuids ??= new List<string>();
                         clearedGuids.Add(existingGuid);
                     }
@@ -345,6 +375,8 @@ namespace TopBarAdaptiveColor
                     foreach (string g in clearedGuids)
                     {
                         _episodes.Remove(g);
+                        _activatedEpisodes.Remove(g);
+                        _lastRecordsByGuid.Remove(g);
                     }
                 }
             }
@@ -374,6 +406,87 @@ namespace TopBarAdaptiveColor
             }
 
             return prevBell != nextBell;
+        }
+
+        private bool HasAnyUnreadStatusItem()
+        {
+            if (_itemsControl == null)
+            {
+                return false;
+            }
+
+            foreach (object? item in _itemsControl.Items)
+            {
+                if (item != null && GetAccessor(item.GetType()).HasUnreadProp?.GetValue(item) is true)
+                {
+                    return true;
+                }
+            }
+
+            return false;
+        }
+
+        private Dictionary<string, BridgedNotificationAckEntry> ReadAckEntriesCached(bool forceReadAck)
+        {
+            if (!forceReadAck && _episodes.Count == 0 && _lastRecordsByGuid.Count == 0 && !HasAnyUnreadStatusItem())
+            {
+                return _cachedAckEntries.Count == 0
+                    ? _cachedAckEntries
+                    : (_cachedAckEntries = new Dictionary<string, BridgedNotificationAckEntry>(StringComparer.Ordinal));
+            }
+
+            try
+            {
+                var info = new FileInfo(_ackPath);
+                if (!info.Exists)
+                {
+                    if (_cachedAckEntries.Count > 0 || _cachedAckWriteUtc != DateTime.MinValue || _cachedAckLength != -1)
+                    {
+                        _cachedAckWriteUtc = DateTime.MinValue;
+                        _cachedAckLength = -1;
+                        _cachedAckEntries = new Dictionary<string, BridgedNotificationAckEntry>(StringComparer.Ordinal);
+                    }
+                    return _cachedAckEntries;
+                }
+
+                DateTime mtime = info.LastWriteTimeUtc;
+                long length = info.Length;
+                if (!forceReadAck && mtime == _cachedAckWriteUtc && length == _cachedAckLength)
+                {
+                    return _cachedAckEntries;
+                }
+
+                Dictionary<string, BridgedNotificationAckEntry> entries = ReadAckEntries(_ackPath);
+                _cachedAckWriteUtc = mtime;
+                _cachedAckLength = length;
+                _cachedAckEntries = entries;
+                return entries;
+            }
+            catch
+            {
+                return ReadAckEntries(_ackPath);
+            }
+        }
+
+        private void TryDispatchAckActivation(
+            string guid,
+            BridgedNotificationAckEntry ackEntry,
+            BridgedNotificationRecord record)
+        {
+            if (_onActivateBridgedRecord == null ||
+                ackEntry.Handled ||
+                !string.Equals(ackEntry.Action, "activate", StringComparison.OrdinalIgnoreCase))
+            {
+                return;
+            }
+
+            if (_activatedEpisodes.TryGetValue(guid, out long activatedEp) && activatedEp == ackEntry.EpisodeId)
+            {
+                return;
+            }
+
+            _activatedEpisodes[guid] = ackEntry.EpisodeId;
+            _onActivateBridgedRecord(record);
         }
 
         private void PublishSnapshotIfChanged(bool enabled, List<BridgedNotificationRecord> items)
@@ -471,7 +584,7 @@ namespace TopBarAdaptiveColor
                 {
                     if (!_disposed)
                     {
-                        Sync(notifyOnChange: true);
+                        SyncCore(notifyOnChange: true, forceReadAck: true);
                     }
                 }));
             }
@@ -759,7 +872,18 @@ namespace TopBarAdaptiveColor
 
         internal static Dictionary<string, long> ReadAckMap(string ackPath)
         {
-            var result = new Dictionary<string, long>(StringComparer.Ordinal);
+            Dictionary<string, BridgedNotificationAckEntry> entries = ReadAckEntries(ackPath);
+            var result = new Dictionary<string, long>(entries.Count, StringComparer.Ordinal);
+            foreach (KeyValuePair<string, BridgedNotificationAckEntry> kv in entries)
+            {
+                result[kv.Key] = kv.Value.EpisodeId;
+            }
+            return result;
+        }
+
+        internal static Dictionary<string, BridgedNotificationAckEntry> ReadAckEntries(string ackPath)
+        {
+            var result = new Dictionary<string, BridgedNotificationAckEntry>(StringComparer.Ordinal);
             if (!File.Exists(ackPath))
             {
                 return result;
@@ -782,7 +906,7 @@ namespace TopBarAdaptiveColor
                         {
                             if (!string.IsNullOrEmpty(entry.Guid) && entry.EpisodeId > 0)
                             {
-                                result[entry.Guid] = entry.EpisodeId;
+                                result[entry.Guid] = entry;
                             }
                         }
                     }

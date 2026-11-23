@@ -1085,6 +1085,56 @@ namespace TopBarAdaptiveColor
             }
         }
 
+        internal static async Task ActivateAppViaTrayOrLaunchAsync(string? executablePath, string? processName, string? displayName)
+        {
+            try
+            {
+                HashSet<uint> targetPids = FindMatchingProcessIds(executablePath, processName);
+                IntPtr prevFg = GetForegroundWindow();
+                (HashSet<IntPtr> prevVisible, HashSet<IntPtr> prevRestored) = SnapshotVisibleAppWindows(targetPids);
+
+                var singleReq = new CustomTrayClickRequest(
+                    executablePath,
+                    processName,
+                    displayName,
+                    null,
+                    null,
+                    IntPtr.Zero,
+                    null,
+                    null,
+                    0,
+                    0,
+                    IsRightClick: false,
+                    IsDoubleClick: false);
+
+                bool relayed = await StatusNotificationTrayRelay.TryRelayCustomTrayRequestAsync(singleReq).ConfigureAwait(false);
+                if (relayed)
+                {
+                    await Task.Delay(95).ConfigureAwait(false);
+                    if (DidClickActivateTarget(targetPids, prevFg, prevVisible, prevRestored))
+                    {
+                        return;
+                    }
+
+                    var dblReq = singleReq with { IsDoubleClick = true };
+                    _ = await StatusNotificationTrayRelay.TryRelayCustomTrayRequestAsync(dblReq).ConfigureAwait(false);
+                    DiagnosticLog.Info($"Auto-escalated bridged card activation to tray double-click (app='{processName ?? displayName}').");
+
+                    await Task.Delay(110).ConfigureAwait(false);
+                    if (DidClickActivateTarget(targetPids, prevFg, prevVisible, prevRestored))
+                    {
+                        return;
+                    }
+                }
+
+                await Task.Run(() => ActivateOrLaunchFallback(executablePath, processName)).ConfigureAwait(false);
+            }
+            catch (Exception ex)
+            {
+                DiagnosticLog.Warn($"ActivateAppViaTrayOrLaunchAsync failed: {ex.Message}");
+            }
+        }
+
         private async Task EnsureNativeStatusSingleClickActivatedAsync(
             CustomTrayClickRequest req,
             long clickGen,
@@ -2625,49 +2675,11 @@ namespace TopBarAdaptiveColor
                         continue;
                     }
 
-                    string? rawExe = sub.GetValue("ExecutablePath") as string;
-                    if (string.IsNullOrWhiteSpace(rawExe))
+                    RegistryEntry? entry = ReadRegistryEntryFromSubkey(sub, subName);
+                    if (entry != null)
                     {
-                        continue;
+                        result.Add(entry);
                     }
-
-                    string expanded = ExpandKnownFolderPath(rawExe);
-                    string procBase = string.Empty;
-                    try
-                    {
-                        procBase = Path.GetFileNameWithoutExtension(expanded);
-                    }
-                    catch
-                    {
-                    }
-
-                    uint? uid = null;
-                    object? uidVal = sub.GetValue("UID");
-                    if (uidVal is int iUid && iUid >= 0)
-                    {
-                        uid = (uint)iUid;
-                    }
-                    else if (uidVal is long lUid && lUid >= 0 && lUid <= uint.MaxValue)
-                    {
-                        uid = (uint)lUid;
-                    }
-
-                    Guid? iconGuid = null;
-                    if (sub.GetValue("IconGuid") is string gStr && Guid.TryParse(gStr, out Guid parsed))
-                    {
-                        iconGuid = parsed;
-                    }
-
-                    result.Add(new RegistryEntry
-                    {
-                        SubkeyName = subName,
-                        ExecutablePath = expanded,
-                        ProcessBaseName = procBase,
-                        InitialTooltip = (sub.GetValue("InitialTooltip") as string ?? string.Empty).Trim(),
-                        Uid = uid,
-                        IconGuid = iconGuid,
-                        IconSnapshot = sub.GetValue("IconSnapshot") as byte[]
-                    });
                 }
             }
             catch (Exception ex)
@@ -2676,6 +2688,134 @@ namespace TopBarAdaptiveColor
             }
 
             return result;
+        }
+
+        private static RegistryEntry? ReadSingleRegistryEntry(string subName)
+        {
+            if (string.IsNullOrWhiteSpace(subName))
+            {
+                return null;
+            }
+
+            try
+            {
+                using RegistryKey? root = Registry.CurrentUser.OpenSubKey(NotifyIconSettingsSubKey);
+                using RegistryKey? sub = root?.OpenSubKey(subName);
+                return sub != null ? ReadRegistryEntryFromSubkey(sub, subName) : null;
+            }
+            catch
+            {
+                return null;
+            }
+        }
+
+        private static RegistryEntry? ReadRegistryEntryFromSubkey(RegistryKey sub, string subName)
+        {
+            string? rawExe = sub.GetValue("ExecutablePath") as string;
+            if (string.IsNullOrWhiteSpace(rawExe))
+            {
+                return null;
+            }
+
+            string expanded = ExpandKnownFolderPath(rawExe);
+            string procBase = string.Empty;
+            try
+            {
+                procBase = Path.GetFileNameWithoutExtension(expanded);
+            }
+            catch
+            {
+            }
+
+            uint? uid = null;
+            object? uidVal = sub.GetValue("UID");
+            if (uidVal is int iUid && iUid >= 0)
+            {
+                uid = (uint)iUid;
+            }
+            else if (uidVal is long lUid && lUid >= 0 && lUid <= uint.MaxValue)
+            {
+                uid = (uint)lUid;
+            }
+
+            Guid? iconGuid = null;
+            if (sub.GetValue("IconGuid") is string gStr && Guid.TryParse(gStr, out Guid parsed))
+            {
+                iconGuid = parsed;
+            }
+
+            return new RegistryEntry
+            {
+                SubkeyName = subName,
+                ExecutablePath = expanded,
+                ProcessBaseName = procBase,
+                InitialTooltip = (sub.GetValue("InitialTooltip") as string ?? string.Empty).Trim(),
+                Uid = uid,
+                IconGuid = iconGuid,
+                IconSnapshot = sub.GetValue("IconSnapshot") as byte[]
+            };
+        }
+
+        private static List<RunningProcessInfo> SnapshotRunningProcessesForEntries(IReadOnlyList<PinnedTrayEntry> entries)
+        {
+            var procNames = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+            foreach (PinnedTrayEntry entry in entries)
+            {
+                if (!string.IsNullOrWhiteSpace(entry.ProcessName))
+                {
+                    string clean = HiddenTrayPinEnhancer.StripExe(entry.ProcessName);
+                    if (!string.IsNullOrEmpty(clean))
+                    {
+                        procNames.Add(clean);
+                    }
+                }
+
+                if (!string.IsNullOrWhiteSpace(entry.ExecutablePath))
+                {
+                    try
+                    {
+                        string exeBase = Path.GetFileNameWithoutExtension(entry.ExecutablePath);
+                        if (!string.IsNullOrWhiteSpace(exeBase))
+                        {
+                            procNames.Add(exeBase);
+                        }
+                    }
+                    catch
+                    {
+                    }
+                }
+            }
+
+            var list = new List<RunningProcessInfo>();
+            foreach (string procName in procNames)
+            {
+                try
+                {
+                    foreach (Process p in Process.GetProcessesByName(procName))
+                    {
+                        using (p)
+                        {
+                            try
+                            {
+                                list.Add(new RunningProcessInfo
+                                {
+                                    Pid = (uint)p.Id,
+                                    ProcessName = p.ProcessName,
+                                    ExecutablePath = TryGetProcessPathSafe(p)
+                                });
+                            }
+                            catch
+                            {
+                            }
+                        }
+                    }
+                }
+                catch
+                {
+                }
+            }
+
+            return list;
         }
 
         public static List<RunningProcessInfo> SnapshotRunningProcesses()
@@ -3263,15 +3403,10 @@ namespace TopBarAdaptiveColor
                 return result;
             }
 
-            List<RunningProcessInfo> runningProcs = SnapshotRunningProcesses();
-            List<RegistryEntry> regEntries = ReadRegistryEntries();
+            List<RunningProcessInfo> runningProcs = SnapshotRunningProcessesForEntries(entries);
+            List<RegistryEntry>? fullRegEntries = null;
+            Dictionary<string, RegistryEntry>? directRegCache = null;
             IReadOnlyList<OverflowButtonSnapshot> overflowButtons = OverflowDragCoordinator.GetLastKnownOverflowButtons();
-
-            var regBySubkey = new Dictionary<string, RegistryEntry>(StringComparer.OrdinalIgnoreCase);
-            foreach (RegistryEntry re in regEntries)
-            {
-                regBySubkey[re.SubkeyName] = re;
-            }
 
             foreach (PinnedTrayEntry entry in entries)
             {
@@ -3293,22 +3428,42 @@ namespace TopBarAdaptiveColor
                 {
                     if (!string.IsNullOrWhiteSpace(entry.RegistrySubkeyName))
                     {
-                        regBySubkey.TryGetValue(entry.RegistrySubkeyName, out bestReg);
+                        directRegCache ??= new Dictionary<string, RegistryEntry>(StringComparer.OrdinalIgnoreCase);
+                        if (!directRegCache.TryGetValue(entry.RegistrySubkeyName, out bestReg))
+                        {
+                            bestReg = ReadSingleRegistryEntry(entry.RegistrySubkeyName);
+                            if (bestReg != null)
+                            {
+                                directRegCache[entry.RegistrySubkeyName] = bestReg;
+                            }
+                        }
                     }
-
-                    bestReg ??= regEntries.FirstOrDefault(r =>
-                        !string.IsNullOrEmpty(normExe) &&
-                        string.Equals(HiddenTrayPinEnhancer.NormalizePath(r.ExecutablePath), normExe, StringComparison.OrdinalIgnoreCase) &&
-                        (!entry.NotifyIconUid.HasValue || r.Uid == entry.NotifyIconUid));
 
                     if (bestReg == null && !string.IsNullOrEmpty(normExe))
                     {
-                        var sameExe = regEntries
-                            .Where(r => string.Equals(HiddenTrayPinEnhancer.NormalizePath(r.ExecutablePath), normExe, StringComparison.OrdinalIgnoreCase))
-                            .ToList();
-                        if (sameExe.Count == 1)
+                        fullRegEntries ??= ReadRegistryEntries();
+                        bestReg = fullRegEntries.FirstOrDefault(r =>
+                            string.Equals(HiddenTrayPinEnhancer.NormalizePath(r.ExecutablePath), normExe, StringComparison.OrdinalIgnoreCase) &&
+                            (!entry.NotifyIconUid.HasValue || r.Uid == entry.NotifyIconUid));
+
+                        if (bestReg == null)
                         {
-                            bestReg = sameExe[0];
+                            RegistryEntry? singleMatch = null;
+                            int matchCount = 0;
+                            foreach (RegistryEntry r in fullRegEntries)
+                            {
+                                if (string.Equals(HiddenTrayPinEnhancer.NormalizePath(r.ExecutablePath), normExe, StringComparison.OrdinalIgnoreCase))
+                                {
+                                    singleMatch = r;
+                                    matchCount++;
+                                    if (matchCount > 1)
+                                    {
+                                        singleMatch = null;
+                                        break;
+                                    }
+                                }
+                            }
+                            bestReg = singleMatch;
                         }
                     }
                 }

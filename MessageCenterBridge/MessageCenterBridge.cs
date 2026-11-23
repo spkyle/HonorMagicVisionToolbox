@@ -228,6 +228,9 @@ namespace MessageCenterBridge
 
         [DataMember(Name = "action")]
         public string Action { get; set; }
+
+        [DataMember(Name = "handled", EmitDefaultValue = false)]
+        public bool Handled { get; set; }
     }
 
     internal static class MessageCenterBridgeController
@@ -247,6 +250,7 @@ namespace MessageCenterBridge
 
         private static readonly object Sync = new object();
         private static readonly Dictionary<IntPtr, Window> HookedWindows = new Dictionary<IntPtr, Window>();
+        private static readonly HashSet<Window> HookedInputWindows = new HashSet<Window>();
         private static readonly HashSet<Button> HookedClearButtons = new HashSet<Button>();
         private static readonly HashSet<FrameworkElement> HookedCards = new HashSet<FrameworkElement>();
         private static readonly Dictionary<string, BridgedNotificationRecord> ActiveRecords = new Dictionary<string, BridgedNotificationRecord>(StringComparer.Ordinal);
@@ -278,8 +282,12 @@ namespace MessageCenterBridge
         private static long _lastObservedGeneration = -1;
         private static long _topBarHwnd;
         private static long _ackGeneration;
+        private static FrameworkElement _pointerDownCard;
         private static Point _cardMouseDownPoint;
         private static bool _hasCardMouseDownPoint;
+        private static string _lastHandledGuid;
+        private static long _lastHandledEpisodeId;
+        private static int _lastHandledTick;
 
         [DllImport("user32.dll", CharSet = CharSet.Unicode)]
         private static extern uint RegisterWindowMessageW(string lpString);
@@ -291,6 +299,10 @@ namespace MessageCenterBridge
         [DllImport("user32.dll")]
         [return: MarshalAs(UnmanagedType.Bool)]
         private static extern bool IsWindow(IntPtr hWnd);
+
+        [DllImport("user32.dll")]
+        [return: MarshalAs(UnmanagedType.Bool)]
+        private static extern bool IsWindowVisible(IntPtr hWnd);
 
         [DllImport("user32.dll")]
         [return: MarshalAs(UnmanagedType.Bool)]
@@ -359,10 +371,126 @@ namespace MessageCenterBridge
             }
 
             EnsureHwndHook(w);
+            HookWindowInput(w);
             HookClearButton(w);
             MessageCenterWindowOptimizer.Attach(w);
             EnsureSyncInfrastructure(w.Dispatcher);
             SyncFromDiskOnUiThread();
+            ScheduleHookVisibleCards();
+        }
+
+        private static void HookWindowInput(Window w)
+        {
+            if (w == null)
+            {
+                return;
+            }
+
+            lock (Sync)
+            {
+                if (!HookedInputWindows.Add(w))
+                {
+                    return;
+                }
+            }
+
+            // Intercept at Window level with handledEventsToo=true because FrameworkElement.LoadedEvent
+            // class handlers are skipped on TipsSuperNotification cards that declare no Loaded handler.
+            w.AddHandler(UIElement.PreviewMouseLeftButtonDownEvent, new MouseButtonEventHandler(OnWindowPreviewMouseLeftButtonDown), true);
+            w.AddHandler(UIElement.PreviewMouseLeftButtonUpEvent, new MouseButtonEventHandler(OnWindowPreviewMouseLeftButtonUp), true);
+            w.AddHandler(UIElement.PreviewTouchDownEvent, new EventHandler<TouchEventArgs>(OnWindowPreviewTouchDown), true);
+            w.AddHandler(UIElement.PreviewTouchUpEvent, new EventHandler<TouchEventArgs>(OnWindowPreviewTouchUp), true);
+            w.IsVisibleChanged += OnHostWindowIsVisibleChanged;
+        }
+
+        private static void OnHostWindowIsVisibleChanged(object sender, DependencyPropertyChangedEventArgs e)
+        {
+            if (e.NewValue is bool && (bool)e.NewValue)
+            {
+                ScheduleHookVisibleCards();
+            }
+        }
+
+        private static void ScheduleHookVisibleCards()
+        {
+            Window targetWindow;
+            lock (Sync)
+            {
+                targetWindow = _primaryWindow;
+            }
+
+            if (targetWindow == null || targetWindow.Dispatcher == null || targetWindow.Dispatcher.HasShutdownStarted)
+            {
+                return;
+            }
+
+            targetWindow.Dispatcher.BeginInvoke(DispatcherPriority.Loaded, new Action(AttachVisibleCardsOnHostWindows));
+        }
+
+        private static void AttachVisibleCardsOnHostWindows()
+        {
+            try
+            {
+                EnsureReflectionInitialized();
+                if (!_reflectionInitialized)
+                {
+                    return;
+                }
+
+                List<Window> windows = new List<Window>();
+                lock (Sync)
+                {
+                    if (_primaryWindow != null)
+                    {
+                        windows.Add(_primaryWindow);
+                    }
+
+                    foreach (Window hw in HookedInputWindows)
+                    {
+                        if (hw != null && !windows.Contains(hw))
+                        {
+                            windows.Add(hw);
+                        }
+                    }
+                }
+
+                for (int i = 0; i < windows.Count; i++)
+                {
+                    WalkAndAttachCards(windows[i]);
+                }
+            }
+            catch
+            {
+                // Best effort fallback walk.
+            }
+        }
+
+        private static void WalkAndAttachCards(DependencyObject root)
+        {
+            if (root == null)
+            {
+                return;
+            }
+
+            int count = VisualTreeHelper.GetChildrenCount(root);
+            for (int i = 0; i < count; i++)
+            {
+                DependencyObject child = VisualTreeHelper.GetChild(root, i);
+                FrameworkElement fe = child as FrameworkElement;
+                if (fe != null)
+                {
+                    if (_tipsSuperControlType != null && _tipsSuperControlType.IsInstanceOfType(fe))
+                    {
+                        AttachTipsSuperNotificationCard(fe);
+                    }
+                    else if (_notifItemNormalType != null && _notifItemNormalType.IsInstanceOfType(fe))
+                    {
+                        FixLoadedNotificationIcon(fe, "dataContext", "LargeIconPath", "imageTitleIcon");
+                    }
+                }
+
+                WalkAndAttachCards(child);
+            }
         }
 
         internal static void OnElementLoaded(FrameworkElement fe)
@@ -750,6 +878,7 @@ namespace MessageCenterBridge
                         {
                             InjectedEpisodeByGuid[rec.Guid] = rec.EpisodeId;
                         }
+                        ScheduleHookVisibleCards();
                         BridgeLog.Info("Added bridged card: guid=" + rec.Guid + " episode=" + rec.EpisodeId + " app=" + rec.DisplayName);
                     }
                 }
@@ -863,8 +992,13 @@ namespace MessageCenterBridge
                 }
             }
 
-            card.PreviewMouseLeftButtonDown += OnBridgedCardPreviewMouseLeftButtonDown;
-            card.PreviewMouseLeftButtonUp += OnBridgedCardPreviewMouseLeftButtonUp;
+            // Use AddHandler(..., handledEventsToo: true) on both Mouse and Touch preview events so
+            // CardTipsBase/SuperNotifItemNormal touch suppression or ScrollViewer handling cannot swallow clicks.
+            card.AddHandler(UIElement.PreviewMouseLeftButtonDownEvent, new MouseButtonEventHandler(OnBridgedCardPreviewMouseLeftButtonDown), true);
+            card.AddHandler(UIElement.PreviewMouseLeftButtonUpEvent, new MouseButtonEventHandler(OnBridgedCardPreviewMouseLeftButtonUp), true);
+            card.AddHandler(UIElement.PreviewTouchDownEvent, new EventHandler<TouchEventArgs>(OnBridgedCardPreviewTouchDown), true);
+            card.AddHandler(UIElement.PreviewTouchUpEvent, new EventHandler<TouchEventArgs>(OnBridgedCardPreviewTouchUp), true);
+            BridgeLog.Info("Attached bridged card input handlers: guid=" + guid);
         }
 
         private static void FixLoadedNotificationIcon(FrameworkElement control, string contextFieldName, string pathPropName, string imageFieldName)
@@ -936,6 +1070,46 @@ namespace MessageCenterBridge
             }
         }
 
+        private static void OnWindowPreviewMouseLeftButtonDown(object sender, MouseButtonEventArgs e)
+        {
+            FrameworkElement card;
+            string guid;
+            if (FindBridgedCardAncestor(e.OriginalSource as DependencyObject, out card, out guid))
+            {
+                HandleBridgedCardPointerDown(card, guid, e.GetPosition(card), e.OriginalSource as DependencyObject, e);
+            }
+        }
+
+        private static void OnWindowPreviewMouseLeftButtonUp(object sender, MouseButtonEventArgs e)
+        {
+            FrameworkElement card;
+            string guid;
+            if (FindBridgedCardAncestor(e.OriginalSource as DependencyObject, out card, out guid))
+            {
+                HandleBridgedCardPointerUp(card, guid, e.GetPosition(card), 10.0, e.OriginalSource as DependencyObject, e);
+            }
+        }
+
+        private static void OnWindowPreviewTouchDown(object sender, TouchEventArgs e)
+        {
+            FrameworkElement card;
+            string guid;
+            if (FindBridgedCardAncestor(e.OriginalSource as DependencyObject, out card, out guid))
+            {
+                HandleBridgedCardPointerDown(card, guid, e.GetTouchPoint(card).Position, e.OriginalSource as DependencyObject, e);
+            }
+        }
+
+        private static void OnWindowPreviewTouchUp(object sender, TouchEventArgs e)
+        {
+            FrameworkElement card;
+            string guid;
+            if (FindBridgedCardAncestor(e.OriginalSource as DependencyObject, out card, out guid))
+            {
+                HandleBridgedCardPointerUp(card, guid, e.GetTouchPoint(card).Position, 16.0, e.OriginalSource as DependencyObject, e);
+            }
+        }
+
         private static void OnBridgedCardPreviewMouseLeftButtonDown(object sender, MouseButtonEventArgs e)
         {
             FrameworkElement card = sender as FrameworkElement;
@@ -945,14 +1119,7 @@ namespace MessageCenterBridge
                 return;
             }
 
-            _cardMouseDownPoint = e.GetPosition(card);
-            _hasCardMouseDownPoint = true;
-
-            if (IsDescendantOfNamedControl(e.OriginalSource as DependencyObject, "gridClose", "btnClose"))
-            {
-                // Suppress Honor SetUIReply for synthetic bridged cards.
-                e.Handled = true;
-            }
+            HandleBridgedCardPointerDown(card, guid, e.GetPosition(card), e.OriginalSource as DependencyObject, e);
         }
 
         private static void OnBridgedCardPreviewMouseLeftButtonUp(object sender, MouseButtonEventArgs e)
@@ -964,39 +1131,148 @@ namespace MessageCenterBridge
                 return;
             }
 
-            if (IsDescendantOfNamedControl(e.OriginalSource as DependencyObject, "gridFold", "btnFold"))
+            HandleBridgedCardPointerUp(card, guid, e.GetPosition(card), 10.0, e.OriginalSource as DependencyObject, e);
+        }
+
+        private static void OnBridgedCardPreviewTouchDown(object sender, TouchEventArgs e)
+        {
+            FrameworkElement card = sender as FrameworkElement;
+            string guid = ExtractCardGuid(card);
+            if (string.IsNullOrEmpty(guid) || !guid.StartsWith(BridgedGuidPrefix, StringComparison.Ordinal))
             {
                 return;
             }
 
-            bool isCloseClick = IsDescendantOfNamedControl(e.OriginalSource as DependencyObject, "gridClose", "btnClose");
-            if (!isCloseClick && _hasCardMouseDownPoint)
+            HandleBridgedCardPointerDown(card, guid, e.GetTouchPoint(card).Position, e.OriginalSource as DependencyObject, e);
+        }
+
+        private static void OnBridgedCardPreviewTouchUp(object sender, TouchEventArgs e)
+        {
+            FrameworkElement card = sender as FrameworkElement;
+            string guid = ExtractCardGuid(card);
+            if (string.IsNullOrEmpty(guid) || !guid.StartsWith(BridgedGuidPrefix, StringComparison.Ordinal))
             {
-                Point up = e.GetPosition(card);
-                if (Math.Abs(up.X - _cardMouseDownPoint.X) > 10.0 || Math.Abs(up.Y - _cardMouseDownPoint.Y) > 10.0)
+                return;
+            }
+
+            HandleBridgedCardPointerUp(card, guid, e.GetTouchPoint(card).Position, 16.0, e.OriginalSource as DependencyObject, e);
+        }
+
+        private static bool FindBridgedCardAncestor(DependencyObject source, out FrameworkElement cardOut, out string guidOut)
+        {
+            cardOut = null;
+            guidOut = null;
+            if (source == null || _tipsSuperControlType == null)
+            {
+                return false;
+            }
+
+            DependencyObject cur = source;
+            while (cur != null)
+            {
+                FrameworkElement fe = cur as FrameworkElement;
+                if (fe != null && _tipsSuperControlType.IsInstanceOfType(fe))
+                {
+                    string guid = ExtractCardGuid(fe);
+                    if (!string.IsNullOrEmpty(guid) && guid.StartsWith(BridgedGuidPrefix, StringComparison.Ordinal))
+                    {
+                        cardOut = fe;
+                        guidOut = guid;
+                        return true;
+                    }
+
+                    return false;
+                }
+
+                cur = VisualTreeHelper.GetParent(cur) ?? LogicalTreeHelper.GetParent(cur);
+            }
+
+            return false;
+        }
+
+        private static void HandleBridgedCardPointerDown(
+            FrameworkElement card,
+            string guid,
+            Point downPoint,
+            DependencyObject originalSource,
+            RoutedEventArgs e)
+        {
+            if (IsDescendantOfNamedControl(originalSource, "gridFold", "btnFold"))
+            {
+                return;
+            }
+
+            _pointerDownCard = card;
+            _cardMouseDownPoint = downPoint;
+            _hasCardMouseDownPoint = true;
+
+            if (IsDescendantOfNamedControl(originalSource, "gridClose", "btnClose"))
+            {
+                // Suppress Honor SetUIReply for synthetic bridged cards.
+                e.Handled = true;
+            }
+        }
+
+        private static void HandleBridgedCardPointerUp(
+            FrameworkElement card,
+            string guid,
+            Point upPoint,
+            double maxMoveTolerance,
+            DependencyObject originalSource,
+            RoutedEventArgs e)
+        {
+            if (IsDescendantOfNamedControl(originalSource, "gridFold", "btnFold"))
+            {
+                return;
+            }
+
+            bool isCloseClick = IsDescendantOfNamedControl(originalSource, "gridClose", "btnClose");
+            if (!isCloseClick && _hasCardMouseDownPoint && object.ReferenceEquals(_pointerDownCard, card))
+            {
+                if (Math.Abs(upPoint.X - _cardMouseDownPoint.X) > maxMoveTolerance ||
+                    Math.Abs(upPoint.Y - _cardMouseDownPoint.Y) > maxMoveTolerance)
                 {
                     _hasCardMouseDownPoint = false;
+                    _pointerDownCard = null;
                     return;
                 }
             }
 
             _hasCardMouseDownPoint = false;
+            _pointerDownCard = null;
             e.Handled = true;
 
             BridgedNotificationRecord rec;
+            long currentEpisode;
+            bool recentlyHandled;
             lock (Sync)
             {
                 ActiveRecords.TryGetValue(guid, out rec);
+                currentEpisode = rec != null ? rec.EpisodeId : 0;
+                if (currentEpisode <= 0)
+                {
+                    InjectedEpisodeByGuid.TryGetValue(guid, out currentEpisode);
+                }
+
+                recentlyHandled =
+                    string.Equals(_lastHandledGuid, guid, StringComparison.Ordinal) &&
+                    _lastHandledEpisodeId == currentEpisode &&
+                    unchecked(Environment.TickCount - _lastHandledTick) >= 0 &&
+                    unchecked(Environment.TickCount - _lastHandledTick) < 800;
+
+                if (recentlyHandled)
+                {
+                    return;
+                }
             }
 
-            long episodeId = rec != null ? rec.EpisodeId : 0;
             if (isCloseClick)
             {
-                DismissSingleCard(guid, episodeId, "dismiss", activateTarget: false, rec: null);
+                DismissSingleCard(guid, currentEpisode, "dismiss", activateTarget: false, rec: null);
             }
             else
             {
-                DismissSingleCard(guid, episodeId, "activate", activateTarget: true, rec: rec);
+                DismissSingleCard(guid, currentEpisode, "activate", activateTarget: true, rec: rec);
             }
         }
 
@@ -1004,6 +1280,10 @@ namespace MessageCenterBridge
         {
             lock (Sync)
             {
+                _lastHandledGuid = guid;
+                _lastHandledEpisodeId = episodeId;
+                _lastHandledTick = Environment.TickCount;
+
                 if (episodeId > 0)
                 {
                     LocalDismissedEpisodes[guid] = episodeId;
@@ -1014,25 +1294,26 @@ namespace MessageCenterBridge
             object vm = _messageVmGetInstanceMethod != null ? _messageVmGetInstanceMethod.Invoke(null, null) : null;
             RemoveCardFromVm(vm, guid);
 
+            bool handled = false;
+            if (activateTarget && rec != null)
+            {
+                HidePrimaryMessageCenterWindow();
+                handled = ActivateTargetApp(rec);
+            }
+
             WriteAckSnapshot(new List<BridgedNotificationAckEntry>
             {
                 new BridgedNotificationAckEntry
                 {
                     Guid = guid,
                     EpisodeId = episodeId,
-                    Action = action
+                    Action = action,
+                    Handled = handled
                 }
             });
 
             NotifyTopBarProcess();
-
-            if (activateTarget && rec != null)
-            {
-                HidePrimaryMessageCenterWindow();
-                ActivateTargetApp(rec);
-            }
-
-            BridgeLog.Info("Handled bridged card " + action + ": guid=" + guid + " episode=" + episodeId);
+            BridgeLog.Info("Handled bridged card " + action + ": guid=" + guid + " episode=" + episodeId + " handled=" + handled);
         }
 
         private static void DismissAllBridgedCards(string action)
@@ -1098,15 +1379,26 @@ namespace MessageCenterBridge
             }
         }
 
-        private static void ActivateTargetApp(BridgedNotificationRecord rec)
+        private static bool HasLiveTopBar()
+        {
+            long hwndValue;
+            lock (Sync)
+            {
+                hwndValue = _topBarHwnd;
+            }
+
+            return hwndValue != 0 && IsWindow(new IntPtr(hwndValue));
+        }
+
+        private static bool ActivateTargetApp(BridgedNotificationRecord rec)
         {
             try
             {
                 IntPtr target = rec.TargetHwnd != 0 ? new IntPtr(rec.TargetHwnd) : IntPtr.Zero;
-                if (target != IntPtr.Zero && IsWindow(target))
+                if (target != IntPtr.Zero && IsWindow(target) && (IsWindowVisible(target) || IsIconic(target)))
                 {
                     ForceForegroundWindow(target);
-                    return;
+                    return true;
                 }
 
                 string procName = rec.ProcessName;
@@ -1123,24 +1415,34 @@ namespace MessageCenterBridge
                         using (procs[i])
                         {
                             IntPtr mainHwnd = procs[i].MainWindowHandle;
-                            if (mainHwnd != IntPtr.Zero && IsWindow(mainHwnd))
+                            if (mainHwnd != IntPtr.Zero && IsWindow(mainHwnd) && (IsWindowVisible(mainHwnd) || IsIconic(mainHwnd)))
                             {
                                 ForceForegroundWindow(mainHwnd);
-                                return;
+                                return true;
                             }
                         }
                     }
                 }
 
+                // When the app is minimized to the tray (e.g., WeChat 4.x Qt with MainWindowHandle == 0),
+                // delegate activation to TopBar's StatusNotificationTrayRelay via ack + _syncMsgId wakeup.
+                if (HasLiveTopBar())
+                {
+                    return false;
+                }
+
                 if (!string.IsNullOrEmpty(rec.LaunchPath) && File.Exists(rec.LaunchPath))
                 {
                     Process.Start(new ProcessStartInfo(rec.LaunchPath) { UseShellExecute = true });
+                    return true;
                 }
             }
             catch (Exception ex)
             {
                 BridgeLog.Warn("ActivateTargetApp failed: " + ex.Message);
             }
+
+            return false;
         }
 
         private static void ForceForegroundWindow(IntPtr target)
@@ -1446,8 +1748,8 @@ namespace MessageCenterBridge
         private static readonly object Sync = new object();
         private static DateTime _lastWriteUtc = DateTime.MinValue;
         private static bool _cachedEnabled = true;
-        private static bool _cachedSoftwareRendering;
-        private static bool _cachedIdleTrim;
+        private static bool _cachedSoftwareRendering = true;
+        private static bool _cachedIdleTrim = true;
 
         public static void InvalidateCache()
         {
@@ -1514,8 +1816,8 @@ namespace MessageCenterBridge
                     lock (Sync)
                     {
                         _cachedEnabled = true;
-                        _cachedSoftwareRendering = false;
-                        _cachedIdleTrim = false;
+                        _cachedSoftwareRendering = true;
+                        _cachedIdleTrim = true;
                         _lastWriteUtc = DateTime.MinValue;
                     }
                     return;
@@ -1531,8 +1833,8 @@ namespace MessageCenterBridge
 
                     string text = File.ReadAllText(ConfigPath, Encoding.UTF8);
                     _cachedEnabled = ParseFlag(text, FastNotifRegex, true);
-                    _cachedSoftwareRendering = ParseFlag(text, SoftwareRenderingRegex, false);
-                    _cachedIdleTrim = ParseFlag(text, IdleTrimRegex, false);
+                    _cachedSoftwareRendering = ParseFlag(text, SoftwareRenderingRegex, true);
+                    _cachedIdleTrim = ParseFlag(text, IdleTrimRegex, true);
                     _lastWriteUtc = mtime;
                 }
             }
@@ -1541,8 +1843,8 @@ namespace MessageCenterBridge
                 lock (Sync)
                 {
                     _cachedEnabled = true;
-                    _cachedSoftwareRendering = false;
-                    _cachedIdleTrim = false;
+                    _cachedSoftwareRendering = true;
+                    _cachedIdleTrim = true;
                 }
             }
         }
@@ -1559,6 +1861,21 @@ namespace MessageCenterBridge
         private const uint UnlimitProcessMemoryMsg = 1002u;
         private const double FastStoryboardSpeedRatio = 1000.0;
         private const int DefaultIdleTrimDelayMs = 180000;
+        private const int DwmwaCloak = 13;
+
+        private sealed class KeyframeBackup
+        {
+            public readonly DoubleKeyFrame Frame;
+            public readonly double OriginalValue;
+            public readonly double TargetValue;
+
+            public KeyframeBackup(DoubleKeyFrame frame, double originalValue, double targetValue)
+            {
+                Frame = frame;
+                OriginalValue = originalValue;
+                TargetValue = targetValue;
+            }
+        }
 
         private static readonly ConditionalWeakTable<Window, MessageCenterWindowOptimizer> Attached =
             new ConditionalWeakTable<Window, MessageCenterWindowOptimizer>();
@@ -1569,6 +1886,7 @@ namespace MessageCenterBridge
         private readonly Storyboard _slideOutStoryboard;
         private readonly double _origSlideInSpeedRatio = 1.0;
         private readonly double _origSlideOutSpeedRatio = 1.0;
+        private readonly KeyframeBackup[] _slideInOpacityKeyframes;
 
         private readonly EventHandler _origContentRenderedDelegate;
         private readonly EventHandler _origSlideOutCompletedDelegate;
@@ -1589,6 +1907,11 @@ namespace MessageCenterBridge
         private readonly object _statusChangeReplyEventVal;
         private readonly MethodInfo _postStorageMessageMethod;
 
+        private object _providerObj;
+        private Window _compHolderWindow;
+        private bool _compHolderEventsHooked;
+        private bool _windowFrameRendered;
+        private bool _uncloakScheduled;
         private bool _contentRenderedDetached;
         private bool _slideOutDetached;
         private bool _hideFallbackDetached;
@@ -1647,6 +1970,7 @@ namespace MessageCenterBridge
                 }
 
                 object prov = _providerField != null ? _providerField.GetValue(_window) : null;
+                _providerObj = prov;
                 if (prov != null)
                 {
                     _hideProviderMethod = prov.GetType().GetMethod("HideWindow", flags);
@@ -1672,6 +1996,7 @@ namespace MessageCenterBridge
                 {
                     _origSlideInSpeedRatio = _slideInStoryboard.SpeedRatio;
                 }
+                _slideInOpacityKeyframes = SnapshotSlideInOpacityKeyframes(_slideInStoryboard);
 
                 _slideOutStoryboard = _window.Resources["SlideOutAnimation"] as Storyboard;
                 if (_slideOutStoryboard != null)
@@ -1687,6 +2012,7 @@ namespace MessageCenterBridge
                 }
             }
 
+            AttachCompHolderIfAvailable();
             _window.IsVisibleChanged += OnWindowIsVisibleChanged;
             _window.Closed += OnWindowClosed;
 
@@ -1802,6 +2128,22 @@ namespace MessageCenterBridge
                     if (Math.Abs(_slideInStoryboard.SpeedRatio - targetIn) > 0.01)
                     {
                         _slideInStoryboard.SpeedRatio = targetIn;
+                    }
+                }
+
+                if (_slideInOpacityKeyframes != null)
+                {
+                    for (int i = 0; i < _slideInOpacityKeyframes.Length; i++)
+                    {
+                        KeyframeBackup kb = _slideInOpacityKeyframes[i];
+                        if (!kb.Frame.IsFrozen)
+                        {
+                            double desired = fast ? kb.TargetValue : kb.OriginalValue;
+                            if (Math.Abs(kb.Frame.Value - desired) > 0.001)
+                            {
+                                kb.Frame.Value = desired;
+                            }
+                        }
                     }
                 }
 
@@ -1937,11 +2279,202 @@ namespace MessageCenterBridge
             }
         }
 
-        private void OnWindowIsVisibleChanged(object sender, DependencyPropertyChangedEventArgs e)
+        private static KeyframeBackup[] SnapshotSlideInOpacityKeyframes(Storyboard sb)
         {
-            ApplyLiveSettings();
+            var list = new List<KeyframeBackup>();
+            try
+            {
+                if (sb == null)
+                {
+                    return list.ToArray();
+                }
+
+                for (int i = 0; i < sb.Children.Count; i++)
+                {
+                    DoubleAnimationUsingKeyFrames da = sb.Children[i] as DoubleAnimationUsingKeyFrames;
+                    if (da == null || da.IsFrozen || da.KeyFrames.Count == 0)
+                    {
+                        continue;
+                    }
+
+                    PropertyPath prop = Storyboard.GetTargetProperty(da);
+                    if (prop == null || !string.Equals(prop.Path, "Opacity", StringComparison.Ordinal))
+                    {
+                        continue;
+                    }
+
+                    DoubleKeyFrame lastKf = da.KeyFrames[da.KeyFrames.Count - 1];
+                    double targetVal = lastKf != null ? lastKf.Value : 1.0;
+                    if (targetVal < 0.01)
+                    {
+                        targetVal = 1.0;
+                    }
+
+                    for (int k = 0; k < da.KeyFrames.Count; k++)
+                    {
+                        DoubleKeyFrame kf = da.KeyFrames[k];
+                        if (kf != null && !kf.IsFrozen)
+                        {
+                            list.Add(new KeyframeBackup(kf, kf.Value, targetVal));
+                        }
+                    }
+                }
+            }
+            catch
+            {
+                // Non-fatal.
+            }
+            return list.ToArray();
+        }
+
+        private void AttachCompHolderIfAvailable()
+        {
+            try
+            {
+                if (_compHolderWindow == null && _providerObj == null && _providerField != null)
+                {
+                    _providerObj = _providerField.GetValue(_window);
+                }
+                if (_compHolderWindow == null && _providerObj != null)
+                {
+                    FieldInfo chField = _providerObj.GetType().GetField(
+                        "_compositionHandleHolder",
+                        BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic);
+                    if (chField != null)
+                    {
+                        _compHolderWindow = chField.GetValue(_providerObj) as Window;
+                    }
+                }
+                if (_compHolderWindow != null && !_compHolderEventsHooked)
+                {
+                    _compHolderWindow.SourceInitialized += OnCompHolderSourceInitialized;
+                    _compHolderWindow.IsVisibleChanged += OnCompHolderIsVisibleChanged;
+                    _compHolderEventsHooked = true;
+                }
+            }
+            catch
+            {
+                // Optional composition holder hook.
+            }
+        }
+
+        private void OnCompHolderSourceInitialized(object sender, EventArgs e)
+        {
+            if (BridgePerfConfig.IsFastNotificationEnabled() && (!_window.IsVisible || !_windowFrameRendered))
+            {
+                TrySetWindowCloaked(_compHolderWindow, true);
+            }
+        }
+
+        private void OnCompHolderIsVisibleChanged(object sender, DependencyPropertyChangedEventArgs e)
+        {
             if (!BridgePerfConfig.IsFastNotificationEnabled())
             {
+                return;
+            }
+
+            if (e.NewValue is bool && (bool)e.NewValue)
+            {
+                if (!_window.IsVisible || !_windowFrameRendered)
+                {
+                    TrySetWindowCloaked(_compHolderWindow, true);
+                    ScheduleUncloakAfterRender();
+                }
+                return;
+            }
+
+            TrySetWindowCloaked(_compHolderWindow, false);
+        }
+
+        private void ScheduleUncloakAfterRender()
+        {
+            if (_uncloakScheduled || _window.Dispatcher == null || _window.Dispatcher.HasShutdownStarted)
+            {
+                return;
+            }
+
+            _uncloakScheduled = true;
+            _window.Dispatcher.BeginInvoke(DispatcherPriority.Render, new Action(delegate
+            {
+                _uncloakScheduled = false;
+                if (_window.IsVisible)
+                {
+                    _windowFrameRendered = true;
+                    TrySetWindowCloaked(_compHolderWindow, false);
+                    TrySetWindowCloaked(_window, false);
+                }
+            }));
+        }
+
+        private void StopStoryboardSafely(Storyboard sb)
+        {
+            if (sb == null || sb.IsFrozen)
+            {
+                return;
+            }
+
+            try
+            {
+                sb.Stop(_window);
+            }
+            catch
+            {
+                // Ignore if not started with window scope.
+            }
+
+            try
+            {
+                sb.Remove(_window);
+            }
+            catch
+            {
+                // Ignore if not controllable on window.
+            }
+
+            try
+            {
+                sb.Stop();
+            }
+            catch
+            {
+                // Ignore if not started without scope.
+            }
+        }
+
+        private static void TrySetWindowCloaked(Window window, bool cloaked)
+        {
+            if (window == null)
+            {
+                return;
+            }
+
+            try
+            {
+                IntPtr hwnd = new WindowInteropHelper(window).Handle;
+                if (hwnd == IntPtr.Zero)
+                {
+                    return;
+                }
+                int val = cloaked ? 1 : 0;
+                DwmSetWindowAttribute(hwnd, DwmwaCloak, ref val, Marshal.SizeOf(typeof(int)));
+            }
+            catch
+            {
+                // Non-fatal on headless/test windows.
+            }
+        }
+
+        private void OnWindowIsVisibleChanged(object sender, DependencyPropertyChangedEventArgs e)
+        {
+            AttachCompHolderIfAvailable();
+            ApplyLiveSettings();
+            bool fast = BridgePerfConfig.IsFastNotificationEnabled();
+            if (!fast)
+            {
+                _windowFrameRendered = false;
+                _uncloakScheduled = false;
+                TrySetWindowCloaked(_window, false);
+                TrySetWindowCloaked(_compHolderWindow, false);
                 if (_idleTrimTimer != null)
                 {
                     _idleTrimTimer.Stop();
@@ -1957,13 +2490,30 @@ namespace MessageCenterBridge
                     _idleTrimTimer.Stop();
                 }
                 UnlimitProcessMemory();
+                StopStoryboardSafely(_slideOutStoryboard);
                 if (_window.Opacity < 0.99)
                 {
                     _window.Opacity = 1.0;
                 }
+                if (!_windowFrameRendered)
+                {
+                    TrySetWindowCloaked(_window, true);
+                    TrySetWindowCloaked(_compHolderWindow, true);
+                    ScheduleUncloakAfterRender();
+                }
+                else
+                {
+                    TrySetWindowCloaked(_window, false);
+                    TrySetWindowCloaked(_compHolderWindow, false);
+                }
             }
             else
             {
+                _windowFrameRendered = false;
+                _uncloakScheduled = false;
+                StopStoryboardSafely(_slideInStoryboard);
+                TrySetWindowCloaked(_window, false);
+                TrySetWindowCloaked(_compHolderWindow, false);
                 RestartIdleTrimTimer();
             }
         }
@@ -2133,6 +2683,17 @@ namespace MessageCenterBridge
         {
             _window.IsVisibleChanged -= OnWindowIsVisibleChanged;
             _window.Closed -= OnWindowClosed;
+            TrySetWindowCloaked(_window, false);
+            if (_compHolderWindow != null)
+            {
+                TrySetWindowCloaked(_compHolderWindow, false);
+                if (_compHolderEventsHooked)
+                {
+                    _compHolderWindow.SourceInitialized -= OnCompHolderSourceInitialized;
+                    _compHolderWindow.IsVisibleChanged -= OnCompHolderIsVisibleChanged;
+                }
+                _compHolderWindow = null;
+            }
 
             if (_idleTrimTimer != null)
             {
@@ -2183,6 +2744,9 @@ namespace MessageCenterBridge
         [DllImport("kernel32.dll", SetLastError = true)]
         [return: MarshalAs(UnmanagedType.Bool)]
         private static extern bool SetProcessWorkingSetSize(IntPtr hProcess, IntPtr dwMinimumWorkingSetSize, IntPtr dwMaximumWorkingSetSize);
+
+        [DllImport("dwmapi.dll")]
+        private static extern int DwmSetWindowAttribute(IntPtr hwnd, int attr, ref int attrValue, int attrSize);
     }
 
     internal static class BridgeLog

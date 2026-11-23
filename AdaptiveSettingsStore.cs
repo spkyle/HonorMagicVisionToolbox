@@ -47,9 +47,9 @@ namespace TopBarAdaptiveColor
 
         public static bool IsFastNotificationResponseEnabled => IsModuleEnabled(ToolboxModuleIds.FastNotificationResponse, true);
 
-        public static bool IsFastOpenSoftwareRenderingEnabled => IsModuleEnabled(ToolboxModuleIds.FastOpenSoftwareRendering, false);
+        public static bool IsFastOpenSoftwareRenderingEnabled => IsModuleEnabled(ToolboxModuleIds.FastOpenSoftwareRendering, true);
 
-        public static bool IsFastOpenIdleMemoryTrimEnabled => IsModuleEnabled(ToolboxModuleIds.FastOpenIdleMemoryTrim, false);
+        public static bool IsFastOpenIdleMemoryTrimEnabled => IsModuleEnabled(ToolboxModuleIds.FastOpenIdleMemoryTrim, true);
 
         public static bool IsNativeTrayRightClickEnabled => IsModuleEnabled(ToolboxModuleIds.NativeTrayRightClick, true);
 
