@@ -12,16 +12,23 @@
   - **默认保留荣耀桌面（本开关默认不勾选），按需开启、一键可逆**。开启后通过官方隐藏消息窗（`HonorDesktop_HideWnd` `WM_CLOSE`）优雅退出 `DesktopHost.exe`（同步清理孤立 `MenuHostNative.exe` 并校验 `SysListView32` 可见性），恢复 100% 原生 Windows 右键菜单、左键高刷框选与图标拖拽，并可节省约 `100–250 MB` 内存及核显共享显存；取消勾选、关闭总开关或卸载时以普通用户权限（Medium IL）自动拉起恢复荣耀桌面。
   - **二级菜单 · 桌面右键加速与防假死预热（`fast_desktop_right_click`）**：保留荣耀桌面时解除 `DesktopHost` / `MenuHostNative` / `CardMenuHostNative` 的 Win11 EcoQoS 限频与内存降级，`MenuHostNative` 自回收退出后以普通用户令牌后台预热，并复接顶栏共享 `SharedRawMouseInputRouter` 在右键按下时预聚焦桌面覆盖层。
 - **二、顶部状态栏 · 关闭顶部状态栏（`disable_topbar`）**：
-  - **默认保留顶部状态栏（本开关默认不勾选），按需开启、一键可逆**。开启后通过 `HostApp` 原生窗口托管机制优雅关闭顶栏并释放顶部工作区，最大化窗口占满屏幕顶部；关闭期间自动在系统托盘保留「Magic 视界工具箱」图标（左键直达工具箱设置页、右键一键恢复顶栏/底栏/桌面），顶栏恢复后自动移除零打扰。原顶栏专属修复（顶栏缝隙修补、右侧弹窗防溢出）已同步规整为本组二级菜单。
+  - **默认保留顶部状态栏（本开关默认不勾选），按需开启、一键可逆**。开启后通过 `HostApp` 原生窗口托管机制优雅关闭顶栏并释放顶部工作区，最大化窗口占满屏幕顶部；关闭期间提供三重无死角恢复入口——**全局快捷键 `Ctrl + Alt + M`**（冲突时自动回退 `Ctrl + Shift + Alt + M`）、**底栏任意图标右键菜单**（自动追加原生亚克力风格的「Magic 视界工具箱设置」与「恢复顶部状态栏」，解决保留底栏时原生系统托盘被隐藏的问题）以及**系统托盘图标**，顶栏恢复后全部自动撤除零打扰。原顶栏专属修复（顶栏缝隙修补、右侧弹窗防溢出）已同步规整为本组二级菜单。
 - **三、底部 Dock 栏 · 关闭底部 Dock 栏（还原 Windows 原生任务栏，`disable_dock`）**：
   - **默认保留底部 Dock 栏（本开关默认不勾选），按需开启、一键可逆**。开启后优雅关闭底栏、释放底部工作区并立即恢复 Windows 原生任务栏（多显示器与分辨率切换自动守护），即使同时关闭顶栏与底栏也不会触发 `magictaskbar-ui.exe` 异常退出循环。
   - **新增二级菜单 · 底栏开始按钮右键弹出原生 Windows 菜单（`dock_start_native_menu`）**：监听底栏开始按钮（`utility:start`）右键事件并触发原生 Windows 快捷菜单（`Win + X`，含任务管理器、终端、设备管理器、电源选项、运行等）。
 
 ### 2. 性能优化
-- **底栏原生高刷解锁（同步显示器 VSync，`dock_high_refresh_rate`）**：突破 WPF `CompositionTarget.Rendering` 60Hz 引擎上限、鼠标移动 `15ms` 输入节流与 `20ms` 互斥抖动；仅在底栏动画活跃期按显示器硬件 `DwmFlush()` 垂直同步通过编译委托直驱 DirectComposition 渲染帧，解锁 120Hz / 165Hz / 240Hz 满帧波浪缩放与滑入滑出（闲置时 0% CPU、0 额外显存）。
+- **底栏原生高刷解锁升级为 DXGI 硬件 VBlank 直驱（`dock_high_refresh_rate`）**：
+  - 突破 WPF `CompositionTarget.Rendering` 60Hz 上限、鼠标移动 `15ms` 输入节流与 Win11 PSR 节能下 `DwmFlush()` 偶发降频停顿（15–147ms），改为直连底栏所在显示器的 **`IDXGIOutput::WaitForVBlank()`** 硬件垂直同步（并内置高精度 `CreateWaitableTimerExW` 与 `DwmFlush` 二/三级回退），实测 120Hz OLED 稳锁满帧 `120.0 fps`（`p50 = 8.33ms`、`p95 ≈ 9ms`、闲置 0% CPU）。
+  - 自适应刷新率最小帧间隔避免悬停进入首帧被 `NormalizeFrameEasing` 钳位跳步；活跃高刷动效期间屏蔽窗口最小化触发的冗余 `RefreshBackdropSampling`（`+1px/-1px` 抖动 + 同步 `DwmFlush`）；在预览窗自然隐藏后取消 18 秒自毁定时器，消除反复冷建 `DockPreviewWindow` 导致的 `72–225ms` 掉帧卡顿。
+- **消除顶栏取色引发的全局 DWM 卡顿与日志 I/O 阻塞**：
+  - `AdaptiveTopBarController` 全量切换为后台线程异步取色（移除主线程同步 `BitBlt` 与 `CAPTUREBLT` 标志），新增窗口句柄颜色缓存与最大/最小化动效静默窗口，取消 `55ms × 5` 连续爆发轮询并在底栏高刷动效期暂停周期取色，消除窗口最大/最小化与底栏滑过时的全局 GPU 回读卡顿。
+  - `DiagnosticLog` 改为无阻塞异步队列落盘，避免磁盘写入阻塞 WPF UI 线程。
 - **加速一键安装构建流程**：`apply_adaptive_topbar.ps1` 在已有 `obj\project.assets.json` 时优先使用 `--no-restore /nr:false` 离线快速编译，避免因访问海外 NuGet 源长时间卡住。
 
 ### 3. 问题修复
+- **修复多窗口缩略图竖排列表中键关闭单个窗口后弹窗悬空**：移除向上抬升 `Top` 偏移并在重新定位前强制刷新布局与底边锚定同步亚克力层，竖排列表关闭窗口后自然贴底收缩不留底部空洞。
+- **修复仅关闭顶栏而保留底栏时无法打开设置恢复的问题**：为顶栏关闭状态补充 `Ctrl + Alt + M` 全局快捷键、底栏图标右键恢复入口及 `MagicTaskbar.TopBar.dll` 按需加载。
 - **修复隐藏托盘全局鼠标钩子在 Win11 下的 `DWMWA_CLOAKED` 滞留隐患**：为 `HiddenTrayPinEnhancer` 的溢出托盘可见性检测补齐 DWM Cloak 状态校验，防止托盘隐藏后 `WH_MOUSE_LL` 钩子滞留导致桌面或第三方应用（如微信）右键偶发失灵。
 
 ---

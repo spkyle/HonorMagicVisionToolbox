@@ -4,6 +4,7 @@ using System.Reflection;
 using System.Runtime.CompilerServices;
 using System.Runtime.InteropServices;
 using System.Text;
+using System.Threading;
 using System.Windows;
 using System.Windows.Controls;
 using System.Windows.Controls.Primitives;
@@ -36,10 +37,13 @@ namespace TopBarAdaptiveColor
         private const double LightForegroundLuminanceEnter = 0.48;
         private const double InitialLuminanceThreshold = 0.53;
 
-        private static readonly TimeSpan PollInterval = TimeSpan.FromMilliseconds(150);
-        private static readonly TimeSpan CoalesceDelay = TimeSpan.FromMilliseconds(10);
-        private static readonly TimeSpan BurstInterval = TimeSpan.FromMilliseconds(55);
+        private static readonly TimeSpan PollInterval = TimeSpan.FromMilliseconds(1000);
+        private static readonly TimeSpan CoalesceDelay = TimeSpan.FromMilliseconds(16);
         private static readonly TimeSpan ColorTransitionDuration = TimeSpan.FromMilliseconds(50);
+        private const long PeriodicResampleIntervalMs = 1200;
+        private const long MinimizeAnimationQuietMs = 340;
+        private const long MaximizeAnimationQuietMs = 280;
+        private const int MaxCachedWindowColors = 64;
 
         private static readonly Color DarkInkColor = Color.FromRgb(0x1F, 0x1F, 0x1F);
         private static readonly Color LightInkColor = Color.FromRgb(0xFF, 0xFF, 0xFF);
@@ -94,10 +98,11 @@ namespace TopBarAdaptiveColor
         private readonly SolidColorBrush _darkBatteryTextBrush;
         private readonly DispatcherTimer _pollTimer;
         private readonly DispatcherTimer _coalesceTimer;
-        private readonly DispatcherTimer _burstTimer;
+        private readonly DispatcherTimer _deferredSampleTimer;
         private readonly List<ItemsControl> _dynamicItemsControls = new();
         private readonly Dictionary<IntPtr, long> _minimizingExclusions = new();
         private readonly List<IntPtr> _activeExclusionBuffer = new();
+        private readonly Dictionary<IntPtr, Color> _hwndColorCache = new();
 
         private Brush? _originalDefaultBackgroundBrush;
         private EventHandler? _borderBackgroundChangedHandler;
@@ -117,7 +122,11 @@ namespace TopBarAdaptiveColor
         private long _lastFullscreenRecoverTick;
         private long _lastDarkForegroundTreeSyncTick;
         private const long DarkForegroundTreeSyncIntervalMs = 1500;
-        private int _burstRemaining;
+        private long _animationQuietUntilTick;
+        private long _lastPixelSampleTick;
+        private IntPtr _lastPixelSampledHwnd;
+        private long _sampleGeneration;
+        private int _bgSampleInFlight;
         private double _baseWindowHeightDip = DefaultTopBarHeightDip;
         private double _origWindowHeight = double.NaN;
         private double _origWindowMaxHeight = double.PositiveInfinity;
@@ -190,33 +199,24 @@ namespace TopBarAdaptiveColor
             _coalesceTimer.Tick += (_, _) =>
             {
                 _coalesceTimer.Stop();
-                EvaluateAndApply();
+                EvaluateAndApply(allowImmediateOffThreadSample: true, isPeriodicPoll: false);
             };
 
-            _burstTimer = new DispatcherTimer(DispatcherPriority.Normal, _window.Dispatcher)
+            _deferredSampleTimer = new DispatcherTimer(DispatcherPriority.Background, _window.Dispatcher)
             {
-                Interval = BurstInterval
+                Interval = TimeSpan.FromMilliseconds(320)
             };
-            _burstTimer.Tick += (_, _) =>
+            _deferredSampleTimer.Tick += (_, _) =>
             {
-                if (_burstRemaining <= 0)
-                {
-                    _burstTimer.Stop();
-                    return;
-                }
-                _burstRemaining--;
-                EvaluateAndApply();
-                if (_burstRemaining <= 0)
-                {
-                    _burstTimer.Stop();
-                }
+                _deferredSampleTimer.Stop();
+                EvaluateAndApply(allowImmediateOffThreadSample: true, isPeriodicPoll: false);
             };
 
-            _pollTimer = new DispatcherTimer(DispatcherPriority.Normal, _window.Dispatcher)
+            _pollTimer = new DispatcherTimer(DispatcherPriority.Background, _window.Dispatcher)
             {
                 Interval = PollInterval
             };
-            _pollTimer.Tick += (_, _) => EvaluateAndApply();
+            _pollTimer.Tick += (_, _) => EvaluateAndApply(allowImmediateOffThreadSample: true, isPeriodicPoll: true);
             _pollTimer.Start();
 
             _window.Closed += OnWindowClosed;
@@ -435,25 +435,31 @@ namespace TopBarAdaptiveColor
 
             if (eventType == EventSystemMinimizeStart)
             {
+                // Protect the entire Windows minimize animation from any global DWM BitBlt stall.
+                ExtendAnimationQuietWindow(MinimizeAnimationQuietMs);
                 if (hwnd != IntPtr.Zero)
                 {
-                    _minimizingExclusions[hwnd] = Environment.TickCount64 + 450;
+                    _minimizingExclusions[hwnd] = Environment.TickCount64 + 480;
                     if (hwnd == _lastMatchedHwnd)
                     {
-                        EvaluateAndApply();
-                        ScheduleCoalescedEvaluate(startBurst: true);
+                        EvaluateAndApply(allowImmediateOffThreadSample: false, isPeriodicPoll: false);
+                        ScheduleDeferredSample(MinimizeAnimationQuietMs + 30);
                         return;
                     }
                 }
+                ScheduleCoalescedEvaluate();
+                return;
             }
             else if (eventType == EventSystemMinimizeEnd)
             {
+                // Protect the restore/unminimize zoom animation from global DWM BitBlt stalls.
+                ExtendAnimationQuietWindow(MaximizeAnimationQuietMs);
                 if (hwnd != IntPtr.Zero && !IsIconic(hwnd))
                 {
                     _minimizingExclusions.Remove(hwnd);
                 }
-                EvaluateAndApply();
-                ScheduleCoalescedEvaluate(startBurst: true);
+                EvaluateAndApply(allowImmediateOffThreadSample: false, isPeriodicPoll: false);
+                ScheduleDeferredSample(MaximizeAnimationQuietMs + 30);
                 return;
             }
             else if (eventType == EventSystemForeground)
@@ -464,11 +470,11 @@ namespace TopBarAdaptiveColor
                 }
                 if (AdaptiveSettingsStore.IsFastSettingsResponseEnabled && IsPopupForegroundWindow(hwnd))
                 {
-                    ScheduleCoalescedEvaluate(startBurst: true);
+                    ScheduleCoalescedEvaluate();
                     return;
                 }
-                EvaluateAndApply();
-                ScheduleCoalescedEvaluate(startBurst: true);
+                EvaluateAndApply(allowImmediateOffThreadSample: true, isPeriodicPoll: false);
+                ScheduleDeferredSample(MaximizeAnimationQuietMs + 30);
                 return;
             }
             else if (eventType == EventObjectDestroy || eventType == EventObjectHide)
@@ -478,9 +484,14 @@ namespace TopBarAdaptiveColor
                     return;
                 }
 
+                if (eventType == EventObjectDestroy)
+                {
+                    _hwndColorCache.Remove(hwnd);
+                }
+
                 if (hwnd == _hwnd)
                 {
-                    ScheduleCoalescedEvaluate(startBurst: true);
+                    ScheduleCoalescedEvaluate();
                     return;
                 }
 
@@ -492,9 +503,10 @@ namespace TopBarAdaptiveColor
                     }
                     return;
                 }
+                ExtendAnimationQuietWindow(260);
                 _minimizingExclusions[hwnd] = Environment.TickCount64 + 350;
-                EvaluateAndApply();
-                ScheduleCoalescedEvaluate(startBurst: true);
+                EvaluateAndApply(allowImmediateOffThreadSample: false, isPeriodicPoll: false);
+                ScheduleDeferredSample(290);
                 return;
             }
             else if (eventType == EventObjectShow)
@@ -523,10 +535,32 @@ namespace TopBarAdaptiveColor
                 }
             }
 
-            ScheduleCoalescedEvaluate(startBurst: true);
+            ScheduleCoalescedEvaluate();
         }
 
-        private void ScheduleCoalescedEvaluate(bool startBurst = false)
+        private void ExtendAnimationQuietWindow(long durationMs)
+        {
+            long target = Environment.TickCount64 + durationMs;
+            if (target > _animationQuietUntilTick)
+            {
+                _animationQuietUntilTick = target;
+            }
+        }
+
+        private void ScheduleDeferredSample(long delayMs)
+        {
+            if (_disposed)
+            {
+                return;
+            }
+
+            long clamped = Math.Clamp(delayMs, 40, 2000);
+            _deferredSampleTimer.Stop();
+            _deferredSampleTimer.Interval = TimeSpan.FromMilliseconds(clamped);
+            _deferredSampleTimer.Start();
+        }
+
+        private void ScheduleCoalescedEvaluate()
         {
             if (_disposed)
             {
@@ -536,15 +570,6 @@ namespace TopBarAdaptiveColor
             if (!_coalesceTimer.IsEnabled)
             {
                 _coalesceTimer.Start();
-            }
-
-            if (startBurst)
-            {
-                _burstRemaining = 5;
-                if (!_burstTimer.IsEnabled)
-                {
-                    _burstTimer.Start();
-                }
             }
         }
 
@@ -631,7 +656,7 @@ namespace TopBarAdaptiveColor
             }
         }
 
-        private void EvaluateAndApply()
+        private void EvaluateAndApply(bool allowImmediateOffThreadSample = true, bool isPeriodicPoll = false)
         {
             if (_disposed)
             {
@@ -653,10 +678,9 @@ namespace TopBarAdaptiveColor
                 return;
             }
 
-            bool allowPixelSample = !IsPopupOpen() &&
-                !(AdaptiveSettingsStore.IsFastSettingsResponseEnabled && IsPopupForegroundWindow(GetForegroundWindow()));
+            // Phase 1 (UI thread, ~0.15ms, ZERO BitBlt): pure Win32 Z-order & geometry check.
             var excluded = GetActiveMinimizingExclusions();
-            WindowSampleResult sample = NativeWindowSampler.SampleTargetMonitor(topBarHwnd, allowPixelSample, excluded);
+            WindowSampleResult sample = NativeWindowSampler.SampleTargetMonitor(topBarHwnd, sampleColor: false, excluded);
 
             if (sample.Kind != WindowMatchKind.MaximizedWindow)
             {
@@ -664,25 +688,145 @@ namespace TopBarAdaptiveColor
                 return;
             }
 
+            bool wasPreviouslyUnmatched = !_isMatched;
             bool hwndChanged = _lastMatchedHwnd != sample.Hwnd;
             _lastMatchedHwnd = sample.Hwnd;
+            if (hwndChanged)
+            {
+                _sampleGeneration++;
+            }
 
-            Color targetColor;
-            if (sample.SampledColor.HasValue)
+            // If we just transitioned from desktop/unmaximized into a newly maximized window (e.g. clicking Maximize),
+            // defer BitBlt until the ~260ms Windows maximize zoom animation finishes so DWM stays locked at 120Hz.
+            if (wasPreviouslyUnmatched && hwndChanged)
             {
-                targetColor = sample.SampledColor.Value;
+                ExtendAnimationQuietWindow(MaximizeAnimationQuietMs);
             }
-            else if (_isMatched && _currentTargetColor.HasValue)
+
+            EnsureAdaptiveBottomAlignment(in sample);
+
+            bool hasCachedColor = _hwndColorCache.TryGetValue(sample.Hwnd, out Color cachedColor);
+            if (hasCachedColor)
             {
-                targetColor = _currentTargetColor.Value;
+                ApplyMatchedColor(cachedColor, hwndChanged ? sample.ProcessName : null);
             }
-            else
+
+            bool allowPixelSample = !IsPopupOpen() &&
+                !(AdaptiveSettingsStore.IsFastSettingsResponseEnabled && IsPopupForegroundWindow(GetForegroundWindow()));
+            if (!allowPixelSample || !sample.PixelRequest.IsValid)
             {
                 return;
             }
 
-            ApplyMatchedColor(targetColor, hwndChanged ? sample.ProcessName : null);
-            EnsureAdaptiveBottomAlignment(in sample);
+            long now = Environment.TickCount64;
+            bool inAnimationQuiet = now < _animationQuietUntilTick;
+            bool dockAnimating = DockHighRefreshRateEnhancer.IsDockMotionActive;
+
+            if (!allowImmediateOffThreadSample || inAnimationQuiet || dockAnimating)
+            {
+                // Defer pixel refresh cleanly until after window animation or Dock swipe settles.
+                if (hwndChanged || !hasCachedColor || !isPeriodicPoll)
+                {
+                    long waitMs = inAnimationQuiet ? Math.Max(40, _animationQuietUntilTick - now + 25) : 220;
+                    ScheduleDeferredSample(waitMs);
+                }
+                return;
+            }
+
+            if (isPeriodicPoll &&
+                !hwndChanged &&
+                hasCachedColor &&
+                _lastPixelSampledHwnd == sample.Hwnd &&
+                now - _lastPixelSampleTick < PeriodicResampleIntervalMs)
+            {
+                return;
+            }
+
+            // Phase 2 (Background thread, 0ms UI-thread stall): run BitBlt off the WPF UI thread.
+            DispatchOffThreadColorSample(sample.PixelRequest, sample.ProcessName, _sampleGeneration, hwndChanged);
+        }
+
+        private void DispatchOffThreadColorSample(
+            PixelSampleRequest request,
+            string? processName,
+            long generation,
+            bool logProcessName)
+        {
+            if (_disposed || !request.IsValid)
+            {
+                return;
+            }
+
+            if (Interlocked.CompareExchange(ref _bgSampleInFlight, 1, 0) != 0)
+            {
+                return;
+            }
+
+            ThreadPool.QueueUserWorkItem(_ =>
+            {
+                Color? sampled = null;
+                try
+                {
+                    if (!_disposed && Volatile.Read(ref _sampleGeneration) == generation)
+                    {
+                        sampled = NativeWindowSampler.SampleColorOffThread(in request);
+                    }
+                }
+                catch
+                {
+                }
+                finally
+                {
+                    Interlocked.Exchange(ref _bgSampleInFlight, 0);
+                }
+
+                if (_disposed || !sampled.HasValue || Volatile.Read(ref _sampleGeneration) != generation)
+                {
+                    return;
+                }
+
+                Color resolvedColor = sampled.Value;
+                try
+                {
+                    Dispatcher disp = _window.Dispatcher;
+                    if (!disp.HasShutdownStarted && !disp.HasShutdownFinished)
+                    {
+                        disp.BeginInvoke(DispatcherPriority.Background, new Action(() =>
+                        {
+                            if (_disposed ||
+                                generation != _sampleGeneration ||
+                                _lastMatchedHwnd != request.Hwnd ||
+                                !IsEligibleForAdaptiveColor())
+                            {
+                                return;
+                            }
+
+                            CacheWindowColor(request.Hwnd, resolvedColor);
+                            _lastPixelSampleTick = Environment.TickCount64;
+                            _lastPixelSampledHwnd = request.Hwnd;
+                            ApplyMatchedColor(resolvedColor, logProcessName ? processName : null);
+                        }));
+                    }
+                }
+                catch
+                {
+                }
+            });
+        }
+
+        private void CacheWindowColor(IntPtr hwnd, Color color)
+        {
+            if (hwnd == IntPtr.Zero)
+            {
+                return;
+            }
+
+            if (_hwndColorCache.Count >= MaxCachedWindowColors && !_hwndColorCache.ContainsKey(hwnd))
+            {
+                _hwndColorCache.Clear();
+            }
+
+            _hwndColorCache[hwnd] = color;
         }
 
         private void ApplyMatchedColor(Color targetColor, string? matchedProcessName = null)
@@ -704,9 +848,9 @@ namespace TopBarAdaptiveColor
             _backgroundBorder.Opacity = 1.0;
 
             bool colorChanged = !_currentTargetColor.HasValue ||
-                Math.Abs(_currentTargetColor.Value.R - targetColor.R) > 2 ||
-                Math.Abs(_currentTargetColor.Value.G - targetColor.G) > 2 ||
-                Math.Abs(_currentTargetColor.Value.B - targetColor.B) > 2;
+                Math.Abs(_currentTargetColor.Value.R - targetColor.R) > 5 ||
+                Math.Abs(_currentTargetColor.Value.G - targetColor.G) > 5 ||
+                Math.Abs(_currentTargetColor.Value.B - targetColor.B) > 5;
 
             if (!wasMatched || colorChanged || !ReferenceEquals(_backgroundBorder.Background, _adaptiveBackgroundBrush))
             {
@@ -769,6 +913,8 @@ namespace TopBarAdaptiveColor
             _lastMatchedHwnd = IntPtr.Zero;
             _currentTargetColor = null;
             _lastDarkForegroundTreeSyncTick = 0;
+            _lastPixelSampledHwnd = IntPtr.Zero;
+            _sampleGeneration++;
 
             if (_useDarkForeground)
             {
@@ -1312,9 +1458,10 @@ namespace TopBarAdaptiveColor
             }
 
             _disposed = true;
+            _sampleGeneration++;
             _pollTimer.Stop();
             _coalesceTimer.Stop();
-            _burstTimer.Stop();
+            _deferredSampleTimer.Stop();
             _windowDragController.Dispose();
             _uiEnhancer.Dispose();
             _window.SizeChanged -= OnWindowSizeChanged;

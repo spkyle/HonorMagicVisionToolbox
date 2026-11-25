@@ -12,6 +12,7 @@ namespace TopBarAdaptiveColor
         private const string TopBarSettingsWindowTypeName = "MagicTaskbarWpf.TopBarSettingsWindow";
         private const string TopBarAcrylicPopupWindowTypeName = "MagicTaskbarWpf.TopBarAcrylicPopupWindow";
         private const string DockPreviewWindowTypeName = "MagicTaskbarWpf.DockPreviewWindow";
+        private const string DockAcrylicMenuWindowTypeName = "MagicTaskbarWpf.DockAcrylicMenuWindow";
         private const string DockMainWindowTypeName = "MagicTaskbarWpf.MainWindow";
 
         private static readonly ConditionalWeakTable<Window, AdaptiveTopBarController> Controllers = new();
@@ -143,6 +144,12 @@ namespace TopBarAdaptiveColor
                 {
                     DockPreviewEnhancers.Add(w, new DockPreviewEnhancer(w));
                 }
+                return;
+            }
+
+            if (string.Equals(fullName, DockAcrylicMenuWindowTypeName, StringComparison.Ordinal))
+            {
+                MagicComponentController.AttachDockMenuWindow(w);
                 return;
             }
 

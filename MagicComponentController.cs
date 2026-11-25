@@ -3,13 +3,17 @@ using System.Collections;
 using System.Collections.Generic;
 using System.Diagnostics;
 using System.Globalization;
+using System.IO;
 using System.Linq;
 using System.Reflection;
 using System.Runtime.InteropServices;
 using System.Text;
 using System.Threading;
 using System.Windows;
+using System.Windows.Controls;
+using System.Windows.Input;
 using System.Windows.Interop;
+using System.Windows.Media;
 using System.Windows.Threading;
 using Microsoft.Win32;
 
@@ -604,14 +608,15 @@ namespace TopBarAdaptiveColor
                         {
                             existing.WindowState = WindowState.Normal;
                         }
-                        existing.Activate();
+                        BringWindowToForeground(existing);
                         TopBarSettingsInjector.TrySelectToolboxTab(existing);
                         return;
                     }
 
                     // 2. Otherwise instantiate TopBarSettingsWindow directly using cached or fresh SettingsStateService.
-                    Assembly? topBarAsm = AppDomain.CurrentDomain.GetAssemblies()
-                        .FirstOrDefault(a => string.Equals(a.GetName().Name, "MagicTaskbar.TopBar", StringComparison.OrdinalIgnoreCase));
+                    // Note: when DisableTopBar=true at startup, MagicTaskbar.TopBar.dll may not be loaded yet,
+                    // so explicitly load it from AppContext.BaseDirectory if absent from the AppDomain.
+                    Assembly? topBarAsm = EnsureTopBarAssemblyLoaded();
                     Type? settingsWinType = topBarAsm?.GetType(TopBarSettingsWindowTypeName);
                     if (settingsWinType == null)
                     {
@@ -647,10 +652,11 @@ namespace TopBarAdaptiveColor
                         {
                             TopBarSettingsInjector.Attach(newSettingsWin);
                             TopBarSettingsInjector.TrySelectToolboxTab(newSettingsWin);
+                            BringWindowToForeground(newSettingsWin);
                         };
                         newSettingsWin.Show();
-                        newSettingsWin.Activate();
-                        DiagnosticLog.Info("MagicComponentController: opened TopBarSettingsWindow from helper tray icon.");
+                        BringWindowToForeground(newSettingsWin);
+                        DiagnosticLog.Info("MagicComponentController: opened TopBarSettingsWindow from toolbox recovery entry.");
                     }
                 }
                 catch (Exception ex)
@@ -658,6 +664,240 @@ namespace TopBarAdaptiveColor
                     DiagnosticLog.Warn($"MagicComponentController OpenToolboxSettingsWindowOnUi failed: {ex}");
                 }
             });
+        }
+
+        private static Assembly? EnsureTopBarAssemblyLoaded()
+        {
+            Assembly? loaded = AppDomain.CurrentDomain.GetAssemblies()
+                .FirstOrDefault(a => string.Equals(a.GetName().Name, "MagicTaskbar.TopBar", StringComparison.OrdinalIgnoreCase));
+            if (loaded != null)
+            {
+                return loaded;
+            }
+
+            try
+            {
+                return Assembly.Load("MagicTaskbar.TopBar");
+            }
+            catch
+            {
+            }
+
+            try
+            {
+                string dllPath = Path.Combine(AppContext.BaseDirectory, "MagicTaskbar.TopBar.dll");
+                if (File.Exists(dllPath))
+                {
+                    return Assembly.LoadFrom(dllPath);
+                }
+            }
+            catch (Exception ex)
+            {
+                DiagnosticLog.Warn($"MagicComponentController EnsureTopBarAssemblyLoaded failed: {ex.Message}");
+            }
+
+            return null;
+        }
+
+        private static void BringWindowToForeground(Window window)
+        {
+            try
+            {
+                IntPtr hwnd = new WindowInteropHelper(window).Handle;
+                if (hwnd != IntPtr.Zero)
+                {
+                    _ = AllowSetForegroundWindow(AsfwAny);
+                    _ = SetForegroundWindow(hwnd);
+                }
+
+                bool wasTopmost = window.Topmost;
+                if (!wasTopmost)
+                {
+                    window.Topmost = true;
+                    window.Topmost = false;
+                }
+
+                window.Activate();
+            }
+            catch
+            {
+            }
+        }
+
+        /// <summary>
+        /// When TopBar is disabled while the bottom Dock remains active (which hides Windows' native Shell_TrayWnd),
+        /// injects native-styled recovery items ("Magic 视界工具箱设置" & "恢复顶部状态栏") into Honor's
+        /// DockAcrylicMenuWindow so right-clicking any Dock icon always offers 1-click access to Settings & restore.
+        /// Leaves Dock menus completely untouched when TopBar is enabled.
+        /// </summary>
+        internal static void AttachDockMenuWindow(Window menuWindow)
+        {
+            if (menuWindow == null || !AdaptiveSettingsStore.IsTopBarDisabled || Volatile.Read(ref _processExiting) == 1)
+            {
+                return;
+            }
+
+            EventHandler? onContentRendered = null;
+            onContentRendered = (s, _) =>
+            {
+                menuWindow.ContentRendered -= onContentRendered;
+                InjectDockMenuRecoveryItems(menuWindow);
+            };
+            menuWindow.ContentRendered += onContentRendered;
+        }
+
+        private static void InjectDockMenuRecoveryItems(Window menuWindow)
+        {
+            if (!AdaptiveSettingsStore.IsTopBarDisabled || !menuWindow.IsVisible || Volatile.Read(ref _processExiting) == 1)
+            {
+                return;
+            }
+
+            try
+            {
+                const BindingFlags flags = BindingFlags.Instance | BindingFlags.Static | BindingFlags.Public | BindingFlags.NonPublic;
+                Type menuType = menuWindow.GetType();
+                if (menuType.GetField("_panel", flags)?.GetValue(menuWindow) is not Border panel ||
+                    panel.Child is not StackPanel stack)
+                {
+                    return;
+                }
+
+                const string injectedTag = "MagicToolboxDockRecoveryItem";
+                foreach (UIElement child in stack.Children)
+                {
+                    if (child is FrameworkElement fe && Equals(fe.Tag, injectedTag))
+                    {
+                        return;
+                    }
+                }
+
+                Brush dividerBrush = ReadMenuBrush(menuType, menuWindow, "DividerBrush", flags)
+                    ?? new SolidColorBrush(Color.FromArgb(48, 255, 255, 255));
+                Brush fgBrush = ReadMenuBrush(menuType, menuWindow, "MenuForeground", flags)
+                    ?? Brushes.White;
+                Brush hoverBg = ReadMenuBrush(menuType, menuWindow, "ItemHover", flags)
+                    ?? new SolidColorBrush(Color.FromArgb(30, 255, 255, 255));
+                Brush hoverBorder = ReadMenuBrush(menuType, menuWindow, "ItemBorderHover", flags)
+                    ?? new SolidColorBrush(Color.FromArgb(40, 255, 255, 255));
+
+                double heightBefore = menuWindow.ActualHeight;
+                bool isZh = CultureInfo.CurrentUICulture.Name.StartsWith("zh", StringComparison.OrdinalIgnoreCase);
+
+                var divider = new Border
+                {
+                    Tag = injectedTag,
+                    Height = 1,
+                    Margin = new Thickness(8, 4, 8, 4),
+                    Background = dividerBrush
+                };
+                stack.Children.Add(divider);
+
+                stack.Children.Add(CreateDockRecoveryMenuItem(
+                    injectedTag,
+                    isZh ? "Magic 视界工具箱设置 (Ctrl+Alt+M)" : "Magic Toolbox Settings (Ctrl+Alt+M)",
+                    fgBrush,
+                    hoverBg,
+                    hoverBorder,
+                    () =>
+                    {
+                        try { menuWindow.Hide(); } catch { }
+                        OpenToolboxSettingsWindowOnUi();
+                    }));
+
+                stack.Children.Add(CreateDockRecoveryMenuItem(
+                    injectedTag,
+                    isZh ? "恢复顶部状态栏" : "Restore Top Status Bar",
+                    fgBrush,
+                    hoverBg,
+                    hoverBorder,
+                    () =>
+                    {
+                        try { menuWindow.Hide(); } catch { }
+                        AdaptiveSettingsStore.SetModuleEnabled(ToolboxModuleIds.DisableTopBar, false);
+                    }));
+
+                stack.InvalidateMeasure();
+                panel.InvalidateMeasure();
+                menuWindow.InvalidateMeasure();
+                menuWindow.UpdateLayout();
+
+                double deltaDip = menuWindow.ActualHeight - heightBefore;
+                if (deltaDip > 0.5)
+                {
+                    double newTop = menuWindow.Top - deltaDip;
+                    double minTop = SystemParameters.VirtualScreenTop + 8;
+                    menuWindow.Top = Math.Max(minTop, newTop);
+                }
+
+                menuType.GetMethod("SyncBackdrop", flags, null, Type.EmptyTypes, null)?.Invoke(menuWindow, null);
+                menuType.GetMethod("PromoteToTop", flags, null, Type.EmptyTypes, null)?.Invoke(menuWindow, null);
+            }
+            catch (Exception ex)
+            {
+                DiagnosticLog.Warn($"MagicComponentController InjectDockMenuRecoveryItems failed: {ex.Message}");
+            }
+        }
+
+        private static Brush? ReadMenuBrush(Type menuType, Window menuWindow, string propertyName, BindingFlags flags)
+        {
+            PropertyInfo? prop = menuType.GetProperty(propertyName, flags);
+            if (prop?.GetMethod == null)
+            {
+                return null;
+            }
+
+            return prop.GetValue(prop.GetMethod.IsStatic ? null : menuWindow) as Brush;
+        }
+
+        private static Border CreateDockRecoveryMenuItem(
+            string tag,
+            string label,
+            Brush foreground,
+            Brush hoverBackground,
+            Brush hoverBorder,
+            Action onClick)
+        {
+            var border = new Border
+            {
+                Tag = tag,
+                Background = Brushes.Transparent,
+                BorderBrush = Brushes.Transparent,
+                BorderThickness = new Thickness(1),
+                CornerRadius = new CornerRadius(10),
+                MinHeight = 36,
+                Cursor = Cursors.Hand
+            };
+
+            var text = new TextBlock
+            {
+                Text = label,
+                Foreground = foreground,
+                FontFamily = new FontFamily("HONOR Sans Design"),
+                FontSize = 14,
+                Margin = new Thickness(14, 0, 14, 0),
+                VerticalAlignment = VerticalAlignment.Center,
+                TextTrimming = TextTrimming.CharacterEllipsis
+            };
+
+            border.Child = text;
+            border.MouseEnter += (_, _) =>
+            {
+                border.Background = hoverBackground;
+                border.BorderBrush = hoverBorder;
+            };
+            border.MouseLeave += (_, _) =>
+            {
+                border.Background = Brushes.Transparent;
+                border.BorderBrush = Brushes.Transparent;
+            };
+            border.MouseLeftButtonUp += (_, e) =>
+            {
+                e.Handled = true;
+                onClick();
+            };
+
+            return border;
         }
 
         private static void DispatchToUi(Action action)
@@ -700,6 +940,7 @@ namespace TopBarAdaptiveColor
         {
             private const uint TrayIconId = 0x5442; // 'TB'
             private const uint WmTrayCallback = 0x8000 + 0x42; // WM_APP + 0x42
+            private const int HotkeyId = 0x5442;
             private const uint CmdOpenSettings = 1001;
             private const uint CmdRestoreTopBar = 1002;
             private const uint CmdRestoreDock = 1003;
@@ -710,6 +951,8 @@ namespace TopBarAdaptiveColor
             private IntPtr _iconHandle;
             private bool _ownsIconHandle;
             private bool _added;
+            private bool _hotkeyRegistered;
+            private string _hotkeyLabel = "Ctrl+Alt+M";
             private bool _disposed;
 
             public ToolboxHelperTrayIcon()
@@ -728,7 +971,45 @@ namespace TopBarAdaptiveColor
                 _taskbarCreatedMsg = RegisterWindowMessageW("TaskbarCreated");
 
                 LoadTrayIconHandle();
+                RegisterRecoveryHotkey();
                 RegisterIcon();
+            }
+
+            private void RegisterRecoveryHotkey()
+            {
+                if (_disposed || _hwndSource.Handle == IntPtr.Zero)
+                {
+                    return;
+                }
+
+                if (RegisterHotKey(_hwndSource.Handle, HotkeyId, ModControl | ModAlt | ModNoRepeat, VkM))
+                {
+                    _hotkeyRegistered = true;
+                    _hotkeyLabel = "Ctrl+Alt+M";
+                }
+                else if (RegisterHotKey(_hwndSource.Handle, HotkeyId, ModControl | ModAlt | ModShift | ModNoRepeat, VkM))
+                {
+                    _hotkeyRegistered = true;
+                    _hotkeyLabel = "Ctrl+Shift+Alt+M";
+                }
+                else
+                {
+                    _hotkeyRegistered = false;
+                }
+
+                DiagnosticLog.Info(
+                    $"MagicComponentController: global settings hotkey registered (ok={_hotkeyRegistered}, key={_hotkeyLabel}).");
+            }
+
+            private void UnregisterRecoveryHotkey()
+            {
+                if (!_hotkeyRegistered || _hwndSource.Handle == IntPtr.Zero)
+                {
+                    return;
+                }
+
+                _hotkeyRegistered = false;
+                _ = UnregisterHotKey(_hwndSource.Handle, HotkeyId);
             }
 
             private void LoadTrayIconHandle()
@@ -773,8 +1054,8 @@ namespace TopBarAdaptiveColor
                     uCallbackMessage = WmTrayCallback,
                     hIcon = _iconHandle,
                     szTip = isZh
-                        ? "Magic 视界工具箱（点击打开设置）"
-                        : "Magic Vision Toolbox (Click for Settings)"
+                        ? $"Magic 视界工具箱（点击或按 {_hotkeyLabel} 打开设置）"
+                        : $"Magic Vision Toolbox (Click or {_hotkeyLabel} for Settings)"
                 };
 
                 _added = Shell_NotifyIconW(NimAdd, ref nid);
@@ -802,6 +1083,14 @@ namespace TopBarAdaptiveColor
             {
                 if (_disposed)
                 {
+                    return IntPtr.Zero;
+                }
+
+                if (msg == WmHotkey && wParam.ToInt32() == HotkeyId)
+                {
+                    handled = true;
+                    DiagnosticLog.Info($"MagicComponentController: opening Settings via global hotkey ({_hotkeyLabel}).");
+                    OpenToolboxSettingsWindowOnUi();
                     return IntPtr.Zero;
                 }
 
@@ -901,6 +1190,7 @@ namespace TopBarAdaptiveColor
                 }
 
                 _disposed = true;
+                UnregisterRecoveryHotkey();
                 UnregisterIcon();
                 try
                 {
@@ -935,6 +1225,14 @@ namespace TopBarAdaptiveColor
         private const int WmLButtonDblClk = 0x0203;
         private const int WmRButtonUp = 0x0205;
         private const int WmContextMenu = 0x007B;
+        private const int WmHotkey = 0x0312;
+
+        private const uint ModAlt = 0x0001;
+        private const uint ModControl = 0x0002;
+        private const uint ModShift = 0x0004;
+        private const uint ModNoRepeat = 0x4000;
+        private const uint VkM = 0x4D;
+        private const uint AsfwAny = 0xFFFFFFFFu;
 
         private const uint MfString = 0x00000000;
         private const uint MfSeparator = 0x00000800;
@@ -1016,6 +1314,18 @@ namespace TopBarAdaptiveColor
         [DllImport("user32.dll")]
         [return: MarshalAs(UnmanagedType.Bool)]
         private static extern bool SetForegroundWindow(IntPtr hWnd);
+
+        [DllImport("user32.dll")]
+        [return: MarshalAs(UnmanagedType.Bool)]
+        private static extern bool AllowSetForegroundWindow(uint dwProcessId);
+
+        [DllImport("user32.dll", SetLastError = true)]
+        [return: MarshalAs(UnmanagedType.Bool)]
+        private static extern bool RegisterHotKey(IntPtr hWnd, int id, uint fsModifiers, uint vk);
+
+        [DllImport("user32.dll", SetLastError = true)]
+        [return: MarshalAs(UnmanagedType.Bool)]
+        private static extern bool UnregisterHotKey(IntPtr hWnd, int id);
 
         [DllImport("user32.dll", SetLastError = true)]
         [return: MarshalAs(UnmanagedType.Bool)]

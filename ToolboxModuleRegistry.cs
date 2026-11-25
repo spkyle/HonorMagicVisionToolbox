@@ -184,8 +184,8 @@ namespace TopBarAdaptiveColor
                 ControlKind = ToolboxControlKind.Toggle,
                 TitleZh = "关闭顶部状态栏",
                 TitleEn = "Disable top status bar",
-                DescriptionZh = "关闭荣耀顶部状态栏并释放顶部工作区，最大化窗口占满屏幕顶部；关闭期间将在系统托盘保留「Magic 视界工具箱」图标，点击可随时打开设置或恢复顶栏",
-                DescriptionEn = "Close the HONOR top bar and release reserved top workspace; keeps a Magic Toolbox icon in the system tray so you can reopen settings or restore TopBar anytime",
+                DescriptionZh = "关闭荣耀顶部状态栏并释放顶部工作区，最大化窗口占满屏幕顶部；关闭期间可随时按 Ctrl+Alt+M、右键底部 Dock 任意图标，或点击系统托盘图标重新打开设置与恢复顶栏",
+                DescriptionEn = "Close the HONOR top bar and release reserved top workspace; while disabled, press Ctrl+Alt+M, right-click any Dock icon, or click the system tray icon anytime to reopen settings or restore TopBar",
                 DefaultEnabled = false
             },
             new()
@@ -346,9 +346,9 @@ namespace TopBarAdaptiveColor
                     ToolboxModuleIds.DisableDock
                 },
                 TitleZh = "底栏原生高刷解锁（同步显示器 VSync）",
-                TitleEn = "Unlock native high-refresh-rate Dock animations (DWM VSync)",
-                DescriptionZh = "突破 WPF 60Hz 上限与鼠标 15ms 输入节流，动效期间按显示器硬件垂直同步（DwmFlush）直驱 DirectComposition，解锁 120Hz/165Hz 满帧波浪缩放与滑入滑出（闲置时 0% 占用）",
-                DescriptionEn = "Bypass WPF's 60Hz cap and 15ms hover throttle by pacing DirectComposition motion frames to hardware DwmFlush VSync (120Hz/165Hz+ smoothness, 0% idle CPU)",
+                TitleEn = "Unlock native high-refresh-rate Dock animations (DXGI VBlank)",
+                DescriptionZh = "突破 WPF 60Hz 上限与鼠标 15ms 输入节流，动效期间按显示器硬件垂直同步（DXGI WaitForVBlank）直驱 DirectComposition，并保持预览窗温热避免冷建掉帧（闲置时 0% 占用）",
+                DescriptionEn = "Bypass WPF's 60Hz cap and 15ms hover throttle by pacing DirectComposition motion frames directly to hardware DXGI VBlank and keeping the Dock preview window warm (0% idle CPU)",
                 DefaultEnabled = true
             },
             new()

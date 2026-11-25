@@ -39,6 +39,7 @@ namespace TopBarAdaptiveColor
         private readonly FieldInfo? _shownPreviewItemIdField;
         private readonly FieldInfo? _dockItemCustomDragActiveField;
         private readonly FieldInfo? _compositionNativeWindowField;
+        private readonly FieldInfo? _previewDisposeCtsField;
         private readonly MethodInfo? _getDockPopupPlateRectMethod;
         private readonly MethodInfo? _scheduleRefreshBurstMethod;
         private readonly MethodInfo? _cancelQueuedPreviewMethod;
@@ -116,6 +117,7 @@ namespace TopBarAdaptiveColor
                 _shownPreviewItemIdField = mwType.GetField("_shownPreviewItemId", flags);
                 _dockItemCustomDragActiveField = mwType.GetField("_dockItemCustomDragActive", flags);
                 _compositionNativeWindowField = mwType.GetField("_compositionNativeWindow", flags);
+                _previewDisposeCtsField = mwType.GetField("_previewDisposeCts", flags);
                 _getDockPopupPlateRectMethod = mwType.GetMethod("GetDockPopupPlateScreenRectPixel", flags);
                 _scheduleRefreshBurstMethod = mwType.GetMethod("SchedulePreviewInteractionRefreshBurst", flags);
                 _cancelQueuedPreviewMethod = mwType.GetMethod("CancelQueuedPreview", flags);
@@ -219,7 +221,51 @@ namespace TopBarAdaptiveColor
                 EndPostCloseRetention();
                 EndDockDragGuard();
                 HidePeekImmediate();
+                ScheduleKeepPreviewWarmOnHide();
             }
+        }
+
+        /// <summary>
+        /// Cancels Honor's 18-second _previewDisposeCts timer AFTER Honor naturally creates, shows, and hides
+        /// DockPreviewWindow. Because DockPreviewWindow.HidePreview() already releases all DWM thumbnail handles
+        /// and hides its backdrop, keeping the empty hidden WPF shell alive prevents repeated 72-225ms cold-create
+        /// freezes on subsequent Dock hovers without touching preview initialization or capture paths.
+        /// </summary>
+        private void ScheduleKeepPreviewWarmOnHide()
+        {
+            if (_disposed || _previewDisposeCtsField == null || !AdaptiveSettingsStore.IsDockHighRefreshRateEnabled)
+            {
+                return;
+            }
+
+            _previewWindow.Dispatcher.BeginInvoke(DispatcherPriority.Background, new Action(() =>
+            {
+                if (_disposed || _previewWindow.IsVisible || !AdaptiveSettingsStore.IsDockHighRefreshRateEnabled)
+                {
+                    return;
+                }
+
+                try
+                {
+                    Window? owner = _previewWindow.Owner;
+                    if (owner == null)
+                    {
+                        return;
+                    }
+
+                    if (_previewDisposeCtsField.GetValue(owner) is System.Threading.CancellationTokenSource cts &&
+                        !cts.IsCancellationRequested)
+                    {
+                        cts.Cancel();
+                    }
+                }
+                catch (ObjectDisposedException)
+                {
+                }
+                catch
+                {
+                }
+            }));
         }
 
         private void OnPreviewWindowLayoutUpdated(object? sender, EventArgs e)
@@ -739,6 +785,14 @@ namespace TopBarAdaptiveColor
 
             _presentedItemsField.SetValue(_previewWindow, newArray);
             _applyPreviewMethod.Invoke(_previewWindow, new object[] { newArray });
+            try
+            {
+                _previewWindow.UpdateLayout();
+            }
+            catch
+            {
+                // Non-fatal layout sync before positioning.
+            }
             EnsureCardsHooked();
 
             RepositionAfterCardRemoved(cursorInsideBefore, cursorDipBefore, boundsBefore);
@@ -767,6 +821,7 @@ namespace TopBarAdaptiveColor
 
         private void RepositionAfterCardRemoved(bool cursorInsideBefore, Point cursorDipBefore, Rect boundsBefore)
         {
+            bool positionedAboveDock = false;
             Window? owner = _previewWindow.Owner;
             if (owner != null && _positionAboveScreenPixelsMethod != null &&
                 _shownAnchorPixelField?.GetValue(owner) is Rect anchorPx &&
@@ -778,6 +833,7 @@ namespace TopBarAdaptiveColor
                     _positionAboveScreenPixelsMethod.Invoke(
                         _previewWindow,
                         new object[] { owner, anchorPx.Left, anchorPx.Top, anchorPx.Width, dockBoundsPx });
+                    positionedAboveDock = true;
                 }
                 catch (Exception ex)
                 {
@@ -797,8 +853,18 @@ namespace TopBarAdaptiveColor
             double curWidth = GetWindowDipWidth(_previewWindow);
             double curHeight = GetWindowDipHeight(_previewWindow);
 
-            // If closing an outer card (or shrinking list rows) moved the popup edge past the cursor,
-            // align smoothly so the replacement card remains under the cursor without closing the popup.
+            // Fallback bottom-anchored drop-down if PositionAboveScreenPixels could not run:
+            // keep the bottom edge flush above the Dock rather than leaving an empty gap underneath.
+            if (!positionedAboveDock && boundsBefore.Height > curHeight + 1.0 && curHeight > 20.0)
+            {
+                double droppedTop = boundsBefore.Bottom - curHeight;
+                double minVirtualTop = SystemParameters.VirtualScreenTop + 12.0;
+                _previewWindow.Top = Math.Max(minVirtualTop, droppedTop);
+            }
+
+            // If closing an outer card horizontally moved the popup edge past the cursor,
+            // align X smoothly so the replacement card remains under the cursor without closing the popup.
+            // Never lift Top back upward for vertical lists — the list must drop down cleanly onto the Dock.
             if (cursorInsideBefore && curWidth > 20.0 && curHeight > 20.0)
             {
                 double curLeft = _previewWindow.Left;
@@ -820,29 +886,31 @@ namespace TopBarAdaptiveColor
                         _previewWindow.Left = shiftedLeft;
                     }
                 }
+            }
 
-                // When closing the top row of a vertical list shrinks Top downward, lift Top gently if safe.
-                double curTop = _previewWindow.Top;
-                if (cursorDipBefore.Y < curTop + 6.0 && boundsBefore.Height > curHeight + 4.0)
+            try
+            {
+                _previewWindow.UpdateLayout();
+            }
+            catch
+            {
+                // Non-fatal.
+            }
+
+            _syncBackdropMethod?.Invoke(_previewWindow, null);
+            _previewWindow.Dispatcher.BeginInvoke(DispatcherPriority.Render, new Action(() =>
+            {
+                if (!_disposed && _previewWindow.IsVisible)
                 {
-                    double minVirtualTop = SystemParameters.VirtualScreenTop + 36.0;
-                    double targetTop = Math.Clamp(cursorDipBefore.Y - 18.0, minVirtualTop, Math.Max(minVirtualTop, curTop));
-                    if (curTop - targetTop > 1.0)
+                    try
                     {
-                        _previewWindow.Top = targetTop;
+                        _syncBackdropMethod?.Invoke(_previewWindow, null);
+                    }
+                    catch
+                    {
                     }
                 }
-
-                try
-                {
-                    _previewWindow.UpdateLayout();
-                }
-                catch
-                {
-                    // Non-fatal.
-                }
-                _syncBackdropMethod?.Invoke(_previewWindow, null);
-            }
+            }));
 
             Rect boundsAfter = new(
                 _previewWindow.Left,

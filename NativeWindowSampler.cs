@@ -15,6 +15,17 @@ namespace TopBarAdaptiveColor
         TrueFullscreen = 2
     }
 
+    internal readonly struct PixelSampleRequest
+    {
+        public bool IsValid { get; init; }
+        public IntPtr Hwnd { get; init; }
+        public int XStart { get; init; }
+        public int XEnd { get; init; }
+        public int Y1 { get; init; }
+        public int Y2 { get; init; }
+        internal NativeWindowSampler.RECT[]? OccludingRects { get; init; }
+    }
+
     internal readonly struct WindowSampleResult
     {
         public WindowMatchKind Kind { get; init; }
@@ -28,6 +39,7 @@ namespace TopBarAdaptiveColor
         public int TopBarBottomPx { get; init; }
         public int TopBarWidthPx { get; init; }
         public double DpiScale { get; init; }
+        public PixelSampleRequest PixelRequest { get; init; }
     }
 
     internal static class NativeWindowSampler
@@ -266,6 +278,40 @@ namespace TopBarAdaptiveColor
 
             int topBarWidthPx = Math.Max(0, topBarRect.Right - topBarRect.Left);
 
+            int leftBound = Math.Max(mon.Left, matchedRect.Left);
+            int rightBound = Math.Min(mon.Right, matchedRect.Right);
+            int spanW = rightBound - leftBound;
+
+            PixelSampleRequest pixelReq = default;
+            if (spanW >= 40)
+            {
+                int margin = Math.Max(20, spanW / 10);
+                int xStart = leftBound + margin;
+                int xEnd = rightBound - margin;
+                if (xEnd <= xStart + 16)
+                {
+                    xStart = leftBound + 4;
+                    xEnd = rightBound - 4;
+                }
+
+                int effectiveSampleBaseY = Math.Max(topBarBottomPx, matchedRect.Top);
+                int effectiveSampleY1 = effectiveSampleBaseY + Math.Max(2, (int)Math.Round(2.5 * dpiScale));
+                int effectiveSampleY2 = effectiveSampleBaseY + Math.Max(4, (int)Math.Round(5.0 * dpiScale));
+                if (effectiveSampleY2 < mon.Bottom && xEnd > xStart)
+                {
+                    pixelReq = new PixelSampleRequest
+                    {
+                        IsValid = true,
+                        Hwnd = matchedHwnd,
+                        XStart = xStart,
+                        XEnd = xEnd,
+                        Y1 = effectiveSampleY1,
+                        Y2 = effectiveSampleY2,
+                        OccludingRects = occludingRects.Count > 0 ? occludingRects.ToArray() : null
+                    };
+                }
+            }
+
             if (!sampleColor)
             {
                 return new WindowSampleResult
@@ -278,44 +324,13 @@ namespace TopBarAdaptiveColor
                     MatchedFrameTopPx = matchedRect.Top,
                     TopBarBottomPx = topBarRect.Bottom,
                     TopBarWidthPx = topBarWidthPx,
-                    DpiScale = dpiScale
+                    DpiScale = dpiScale,
+                    PixelRequest = pixelReq
                 };
             }
 
-            int leftBound = Math.Max(mon.Left, matchedRect.Left);
-            int rightBound = Math.Min(mon.Right, matchedRect.Right);
-            int spanW = rightBound - leftBound;
-            if (spanW < 40)
-            {
-                return new WindowSampleResult
-                {
-                    Kind = WindowMatchKind.MaximizedWindow,
-                    Hwnd = matchedHwnd,
-                    ProcessName = matchedProcName,
-                    KeepPreviousColor = true,
-                    MonitorTopPx = mon.Top,
-                    WorkTopPx = work.Top,
-                    MatchedFrameTopPx = matchedRect.Top,
-                    TopBarBottomPx = topBarRect.Bottom,
-                    TopBarWidthPx = topBarWidthPx,
-                    DpiScale = dpiScale
-                };
-            }
-
-            int margin = Math.Max(20, spanW / 10);
-            int xStart = leftBound + margin;
-            int xEnd = rightBound - margin;
-            if (xEnd <= xStart + 16)
-            {
-                xStart = leftBound + 4;
-                xEnd = rightBound - 4;
-            }
-
-            int effectiveSampleBaseY = Math.Max(topBarBottomPx, matchedRect.Top);
-            int effectiveSampleY1 = effectiveSampleBaseY + Math.Max(2, (int)Math.Round(2.5 * dpiScale));
-            int effectiveSampleY2 = effectiveSampleBaseY + Math.Max(4, (int)Math.Round(5.0 * dpiScale));
-            Color? color = effectiveSampleY2 < mon.Bottom
-                ? SampleStripDominantColor(xStart, xEnd, effectiveSampleY1, effectiveSampleY2, occludingRects)
+            Color? color = pixelReq.IsValid
+                ? SampleStripDominantColor(pixelReq.XStart, pixelReq.XEnd, pixelReq.Y1, pixelReq.Y2, pixelReq.OccludingRects)
                 : null;
 
             return new WindowSampleResult
@@ -330,8 +345,19 @@ namespace TopBarAdaptiveColor
                 MatchedFrameTopPx = matchedRect.Top,
                 TopBarBottomPx = topBarRect.Bottom,
                 TopBarWidthPx = topBarWidthPx,
-                DpiScale = dpiScale
+                DpiScale = dpiScale,
+                PixelRequest = pixelReq
             };
+        }
+
+        public static Color? SampleColorOffThread(in PixelSampleRequest req)
+        {
+            if (!req.IsValid)
+            {
+                return null;
+            }
+
+            return SampleStripDominantColor(req.XStart, req.XEnd, req.Y1, req.Y2, req.OccludingRects);
         }
 
         internal static bool HasRealFullscreenWindow(IntPtr topBarHwnd)
@@ -412,7 +438,7 @@ namespace TopBarAdaptiveColor
             int xEnd,
             int y1,
             int y2,
-            List<RECT> occludingRects)
+            RECT[]? occludingRects)
         {
             int width = xEnd - xStart;
             int height = (y2 - y1) + 1;
@@ -460,7 +486,9 @@ namespace TopBarAdaptiveColor
                 }
 
                 oldObj = SelectObject(memDc, hBitmap);
-                if (!BitBlt(memDc, 0, 0, width, height, screenDc, xStart, y1, Srccopy | CaptureBlt))
+                // On Windows 10/11 DWM desktop DC, SRCCOPY already captures composed layered windows
+                // while avoiding CAPTUREBLT's extra cursor/layered synchronization overhead.
+                if (!BitBlt(memDc, 0, 0, width, height, screenDc, xStart, y1, Srccopy))
                 {
                     return null;
                 }
@@ -502,13 +530,16 @@ namespace TopBarAdaptiveColor
                 {
                     int screenX = xStart + localX;
                     bool occluded = false;
-                    for (int i = 0; i < occludingRects.Count; i++)
+                    if (occludingRects != null)
                     {
-                        var r = occludingRects[i];
-                        if (screenX >= r.Left && screenX < r.Right)
+                        for (int i = 0; i < occludingRects.Length; i++)
                         {
-                            occluded = true;
-                            break;
+                            var r = occludingRects[i];
+                            if (screenX >= r.Left && screenX < r.Right)
+                            {
+                                occluded = true;
+                                break;
+                            }
                         }
                     }
 
@@ -646,7 +677,7 @@ namespace TopBarAdaptiveColor
         private delegate bool EnumWindowsProc(IntPtr hwnd, IntPtr lParam);
 
         [StructLayout(LayoutKind.Sequential)]
-        private struct RECT
+        internal struct RECT
         {
             public int Left;
             public int Top;
