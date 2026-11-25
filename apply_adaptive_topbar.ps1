@@ -75,8 +75,19 @@ if ($needsBuild) {
     if (-not (Get-Command dotnet -ErrorAction SilentlyContinue)) {
         throw "未找到预编译的 bin\Release 产物且本机未安装 .NET SDK。请确认下载并完整解压 Release 页面中的 MagicVisionToolbox-v*.zip（不要只下载 Source code 源码包）。"
     }
-    Write-Host "正在编译最新补丁产物 (dotnet build -c Release)..." -ForegroundColor Cyan
-    dotnet build (Join-Path $PSScriptRoot "TopBarAdaptiveColor.csproj") -c Release
+    $csprojPath = Join-Path $PSScriptRoot "TopBarAdaptiveColor.csproj"
+    $assetsPath = Join-Path $PSScriptRoot "obj\project.assets.json"
+    if (Test-Path $assetsPath) {
+        Write-Host "正在离线快速编译最新补丁产物 (dotnet build -c Release --no-restore)..." -ForegroundColor Cyan
+        dotnet build $csprojPath -c Release --no-restore /nr:false
+        if ($LASTEXITCODE -ne 0) {
+            Write-Host "离线编译未通过，正在尝试完整还原并编译..." -ForegroundColor Yellow
+            dotnet build $csprojPath -c Release /nr:false
+        }
+    } else {
+        Write-Host "正在编译最新补丁产物 (dotnet build -c Release)..." -ForegroundColor Cyan
+        dotnet build $csprojPath -c Release /nr:false
+    }
     if ($LASTEXITCODE -ne 0) {
         throw "dotnet build 失败 (ExitCode=$LASTEXITCODE)。"
     }

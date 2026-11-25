@@ -12,10 +12,13 @@ namespace TopBarAdaptiveColor
         private const string TopBarSettingsWindowTypeName = "MagicTaskbarWpf.TopBarSettingsWindow";
         private const string TopBarAcrylicPopupWindowTypeName = "MagicTaskbarWpf.TopBarAcrylicPopupWindow";
         private const string DockPreviewWindowTypeName = "MagicTaskbarWpf.DockPreviewWindow";
+        private const string DockMainWindowTypeName = "MagicTaskbarWpf.MainWindow";
 
         private static readonly ConditionalWeakTable<Window, AdaptiveTopBarController> Controllers = new();
         private static readonly ConditionalWeakTable<Window, HiddenTrayPinEnhancer> HiddenTrayPinEnhancers = new();
         private static readonly ConditionalWeakTable<Window, DockPreviewEnhancer> DockPreviewEnhancers = new();
+        private static readonly ConditionalWeakTable<Window, DockStartRightClickEnhancer> DockStartEnhancers = new();
+        private static readonly ConditionalWeakTable<Window, DockHighRefreshRateEnhancer> DockHighRefreshEnhancers = new();
         private static Timer? _uiPollTimer;
         private static int _uiHooked;
 
@@ -67,9 +70,17 @@ namespace TopBarAdaptiveColor
                     handledEventsToo: true);
 
                 Application? app = Application.Current;
+                NativeDesktopController.Initialize();
+                MagicComponentController.Initialize(app);
+                DesktopRightClickAccelerator.Initialize(app?.Dispatcher);
                 if (app != null)
                 {
+                    var snapshot = new System.Collections.Generic.List<Window>();
                     foreach (Window w in app.Windows)
+                    {
+                        snapshot.Add(w);
+                    }
+                    foreach (Window w in snapshot)
                     {
                         TryAttachWindow(w);
                     }
@@ -93,6 +104,11 @@ namespace TopBarAdaptiveColor
 
         private static void TryAttachWindow(Window w)
         {
+            if (MagicComponentController.ShouldSuppressWindow(w))
+            {
+                return;
+            }
+
             string? fullName = w.GetType().FullName;
             if (string.Equals(fullName, TopBarWindowTypeName, StringComparison.Ordinal))
             {
@@ -126,6 +142,19 @@ namespace TopBarAdaptiveColor
                 if (!DockPreviewEnhancers.TryGetValue(w, out _))
                 {
                     DockPreviewEnhancers.Add(w, new DockPreviewEnhancer(w));
+                }
+                return;
+            }
+
+            if (string.Equals(fullName, DockMainWindowTypeName, StringComparison.Ordinal))
+            {
+                if (!DockStartEnhancers.TryGetValue(w, out _))
+                {
+                    DockStartEnhancers.Add(w, new DockStartRightClickEnhancer(w));
+                }
+                if (!DockHighRefreshEnhancers.TryGetValue(w, out _))
+                {
+                    DockHighRefreshEnhancers.Add(w, new DockHighRefreshRateEnhancer(w));
                 }
             }
         }

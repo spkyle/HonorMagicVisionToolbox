@@ -4,6 +4,7 @@ using System.ComponentModel;
 using System.Diagnostics;
 using System.Globalization;
 using System.IO;
+using System.Reflection;
 using System.Text;
 using System.Windows;
 
@@ -11,10 +12,11 @@ namespace TopBarAdaptiveColor
 {
     internal enum ToolboxCategory
     {
-        StatusBarEnhancements = 0,
-        DockEnhancements = 1,
-        BugFixes = 2,
-        Maintenance = 3
+        Desktop = 0,
+        StatusBarEnhancements = 1,
+        DockEnhancements = 2,
+        BugFixes = 3,
+        Maintenance = 4
     }
 
     internal enum ToolboxControlKind
@@ -25,12 +27,17 @@ namespace TopBarAdaptiveColor
 
     internal static class ToolboxModuleIds
     {
+        public const string NativeWindowsDesktop = "native_windows_desktop";
+        public const string DisableTopBar = "disable_topbar";
+        public const string DisableDock = "disable_dock";
         public const string AdaptiveTopBarColor = "adaptive_topbar_color";
         public const string ShowYoyoClawButton = "show_yoyo_claw_button";
         public const string NotificationAlertAnimation = "notification_alert_animation";
         public const string NativeTrayRightClick = "native_tray_right_click";
         public const string HiddenTrayIconPinning = "hidden_tray_icon_pinning";
         public const string TopBarMaximizedWindowDrag = "topbar_maximized_window_drag";
+        public const string DockStartNativeMenu = "dock_start_native_menu";
+        public const string DockHighRefreshRate = "dock_high_refresh_rate";
         public const string DockPreviewKeepOpenOnClose = "dock_preview_keep_open_on_close";
         public const string DockPreviewAeroPeek = "dock_preview_aero_peek";
         public const string DockPreviewTransferCorridor = "dock_preview_transfer_corridor";
@@ -40,6 +47,7 @@ namespace TopBarAdaptiveColor
         public const string FastNotificationResponse = "fast_notification_response";
         public const string FastOpenSoftwareRendering = "fast_open_software_rendering";
         public const string FastOpenIdleMemoryTrim = "fast_open_idle_memory_trim";
+        public const string FastDesktopRightClick = "fast_desktop_right_click";
         public const string TouchpadThreeFingerSearch = "touchpad_three_finger_search";
         public const string ActionOpenGitHub = "action_open_github";
         public const string ActionOpenLogs = "action_open_logs";
@@ -65,6 +73,7 @@ namespace TopBarAdaptiveColor
         public string DescriptionEn { get; init; } = string.Empty;
         public bool DefaultEnabled { get; init; } = true;
         public IReadOnlyList<string>? ParentModuleIds { get; init; }
+        public IReadOnlyList<string>? DisabledWhenModuleIds { get; init; }
         public string? ActionTextZh { get; init; }
         public string? ActionTextEn { get; init; }
         public bool IsDestructiveAction { get; init; }
@@ -73,43 +82,121 @@ namespace TopBarAdaptiveColor
 
     internal static class ToolboxModuleRegistry
     {
+        public const string FallbackVersion = "1.0.2";
+        public static readonly string ToolboxVersion = ResolveToolboxVersion();
         public const string GitHubRepoUrl = "https://github.com/spkyle/HonorMagicVisionToolbox";
+
+        private static string ResolveToolboxVersion()
+        {
+            try
+            {
+                string? info = Assembly.GetExecutingAssembly()
+                    .GetCustomAttribute<AssemblyInformationalVersionAttribute>()
+                    ?.InformationalVersion;
+                if (!string.IsNullOrWhiteSpace(info))
+                {
+                    int plusIdx = info.IndexOf('+');
+                    string clean = (plusIdx >= 0 ? info.Substring(0, plusIdx) : info).Trim();
+                    if (!string.IsNullOrEmpty(clean))
+                    {
+                        return clean.StartsWith("v", StringComparison.OrdinalIgnoreCase)
+                            ? "v" + clean.Substring(1)
+                            : "v" + clean;
+                    }
+                }
+            }
+            catch
+            {
+            }
+
+            return "v" + FallbackVersion;
+        }
 
         public static readonly IReadOnlyList<ToolboxCategoryMeta> Categories = new ToolboxCategoryMeta[]
         {
             new()
             {
+                Category = ToolboxCategory.Desktop,
+                TitleZh = "一、桌面",
+                TitleEn = "1. Desktop"
+            },
+            new()
+            {
                 Category = ToolboxCategory.StatusBarEnhancements,
-                TitleZh = "一、状态栏",
-                TitleEn = "Top Status Bar"
+                TitleZh = "二、顶部状态栏",
+                TitleEn = "2. Top Status Bar"
             },
             new()
             {
                 Category = ToolboxCategory.DockEnhancements,
-                TitleZh = "二、Dock 栏",
-                TitleEn = "Dock & Multitasking"
+                TitleZh = "三、底部 Dock 栏",
+                TitleEn = "3. Bottom Dock"
             },
             new()
             {
                 Category = ToolboxCategory.BugFixes,
-                TitleZh = "三、问题修复与性能",
-                TitleEn = "Fixes & Performance"
+                TitleZh = "四、通用性能与系统",
+                TitleEn = "4. System & Performance"
             },
             new()
             {
                 Category = ToolboxCategory.Maintenance,
-                TitleZh = "四、项目与维护",
-                TitleEn = "Project & Maintenance"
+                TitleZh = "五、项目与维护",
+                TitleEn = "5. Project & Maintenance"
             }
         };
 
         public static readonly IReadOnlyList<ToolboxModuleDescriptor> Modules = new ToolboxModuleDescriptor[]
         {
+            // === 一、桌面 ===
+            new()
+            {
+                Id = ToolboxModuleIds.NativeWindowsDesktop,
+                Category = ToolboxCategory.Desktop,
+                ControlKind = ToolboxControlKind.Toggle,
+                TitleZh = "关闭荣耀桌面接管（还原 Windows 原生桌面）",
+                TitleEn = "Disable HONOR desktop takeover (restore native Windows desktop)",
+                DescriptionZh = "优雅退出荣耀桌面覆盖层（DesktopHost），恢复 100% 原生 Windows 右键菜单、左键高刷框选与图标拖拽；关闭开关可随时恢复荣耀桌面",
+                DescriptionEn = "Gracefully exit DesktopHost to restore native Windows right-click, high-FPS drag-select, and icon drag-drop (turn off anytime to restore HONOR desktop)",
+                DefaultEnabled = false
+            },
+            new()
+            {
+                Id = ToolboxModuleIds.FastDesktopRightClick,
+                Category = ToolboxCategory.Desktop,
+                ControlKind = ToolboxControlKind.Toggle,
+                DisabledWhenModuleIds = new[]
+                {
+                    ToolboxModuleIds.NativeWindowsDesktop
+                },
+                TitleZh = "桌面右键加速与防假死预热",
+                TitleEn = "Desktop right-click acceleration & MenuHost prewarm",
+                DescriptionZh = "二级选项（保留荣耀桌面时生效）：解除桌面右键宿主进程的 Win11 效能模式限频与内存降级、进程自回收后自动以普通权限预热，并在右键按下时预聚焦桌面覆盖层",
+                DescriptionEn = "Sub-option (when keeping HONOR desktop): disable Win11 EcoQoS throttling on DesktopHost & MenuHostNative, auto-prewarm MenuHostNative at Medium IL after self-recycle, and pre-focus on right-button down",
+                DefaultEnabled = true
+            },
+
+            // === 二、顶部状态栏 ===
+            new()
+            {
+                Id = ToolboxModuleIds.DisableTopBar,
+                Category = ToolboxCategory.StatusBarEnhancements,
+                ControlKind = ToolboxControlKind.Toggle,
+                TitleZh = "关闭顶部状态栏",
+                TitleEn = "Disable top status bar",
+                DescriptionZh = "关闭荣耀顶部状态栏并释放顶部工作区，最大化窗口占满屏幕顶部；关闭期间将在系统托盘保留「Magic 视界工具箱」图标，点击可随时打开设置或恢复顶栏",
+                DescriptionEn = "Close the HONOR top bar and release reserved top workspace; keeps a Magic Toolbox icon in the system tray so you can reopen settings or restore TopBar anytime",
+                DefaultEnabled = false
+            },
             new()
             {
                 Id = ToolboxModuleIds.AdaptiveTopBarColor,
                 Category = ToolboxCategory.StatusBarEnhancements,
                 ControlKind = ToolboxControlKind.Toggle,
+                DisabledWhenModuleIds = new[]
+                {
+                    ToolboxModuleIds.DisableTopBar
+                },
                 TitleZh = "全屏与最大化时状态栏自适应配色",
                 TitleEn = "Adaptive top bar color for maximized windows",
                 DescriptionZh = "匹配当前最大化窗口标题栏颜色并自适应深浅前景，同时避免全屏录屏浮层导致顶栏误隐藏",
@@ -118,9 +205,43 @@ namespace TopBarAdaptiveColor
             },
             new()
             {
+                Id = ToolboxModuleIds.AdaptiveTopBarGapFix,
+                Category = ToolboxCategory.StatusBarEnhancements,
+                ControlKind = ToolboxControlKind.Toggle,
+                DisabledWhenModuleIds = new[]
+                {
+                    ToolboxModuleIds.DisableTopBar
+                },
+                TitleZh = "修正窗口最大化后顶栏下方缝隙",
+                TitleEn = "Fix top bar bottom seam after maximizing",
+                DescriptionZh = "工作区重算导致最大化窗口轻微下移时，向下扩展状态栏背景高度以消除桌面透缝",
+                DescriptionEn = "Extend top bar bottom edge when workspace reservation shifts windows down",
+                DefaultEnabled = true
+            },
+            new()
+            {
+                Id = ToolboxModuleIds.TopBarPopupEdgeClamp,
+                Category = ToolboxCategory.StatusBarEnhancements,
+                ControlKind = ToolboxControlKind.Toggle,
+                DisabledWhenModuleIds = new[]
+                {
+                    ToolboxModuleIds.DisableTopBar
+                },
+                TitleZh = "修正右侧弹出面板超出屏幕边缘",
+                TitleEn = "Clamp top bar popups inside monitor bounds",
+                DescriptionZh = "隐藏部分右侧图标后，将控制中心、电池、音量等弹窗及其模糊层限制在当前显示器工作区内",
+                DescriptionEn = "Prevent battery/volume/network popups and acrylic backdrops from clipping past the screen edge",
+                DefaultEnabled = true
+            },
+            new()
+            {
                 Id = ToolboxModuleIds.ShowYoyoClawButton,
                 Category = ToolboxCategory.StatusBarEnhancements,
                 ControlKind = ToolboxControlKind.Toggle,
+                DisabledWhenModuleIds = new[]
+                {
+                    ToolboxModuleIds.DisableTopBar
+                },
                 TitleZh = "显示右侧 YOYO Claw 按钮",
                 TitleEn = "Show YOYO Claw button on top bar",
                 DescriptionZh = "控制状态栏右侧控制中心旁 YOYO Claw 按钮的显示状态，取消勾选后立即隐藏",
@@ -132,6 +253,10 @@ namespace TopBarAdaptiveColor
                 Id = ToolboxModuleIds.NotificationAlertAnimation,
                 Category = ToolboxCategory.StatusBarEnhancements,
                 ControlKind = ToolboxControlKind.Toggle,
+                DisabledWhenModuleIds = new[]
+                {
+                    ToolboxModuleIds.DisableTopBar
+                },
                 TitleZh = "微信等应用未读消息收纳至通知中心与红标震动提醒",
                 TitleEn = "Bridge unread chat app alerts to Notification Center with red bell & shake",
                 DescriptionZh = "将微信、飞书、钉钉、QQ 等顶栏未读消息同步生成卡片收纳到右上角通知中心，通知按钮高亮红色 (#ED3D37) 并约每 2 秒震动提醒；点卡可跳转原窗口",
@@ -143,6 +268,10 @@ namespace TopBarAdaptiveColor
                 Id = ToolboxModuleIds.HiddenTrayIconPinning,
                 Category = ToolboxCategory.StatusBarEnhancements,
                 ControlKind = ToolboxControlKind.Toggle,
+                DisabledWhenModuleIds = new[]
+                {
+                    ToolboxModuleIds.DisableTopBar
+                },
                 TitleZh = "任意隐藏托盘图标拖拽固定与拖回",
                 TitleEn = "Drag any hidden tray icon to pin or hide on top bar",
                 DescriptionZh = "展开 ^ 隐藏托盘后可将任意程序图标拖到顶栏固定；把顶栏图标拖回 ^ 箭头松手即可收进隐藏托盘",
@@ -154,6 +283,10 @@ namespace TopBarAdaptiveColor
                 Id = ToolboxModuleIds.NativeTrayRightClick,
                 Category = ToolboxCategory.StatusBarEnhancements,
                 ControlKind = ToolboxControlKind.Toggle,
+                DisabledWhenModuleIds = new[]
+                {
+                    ToolboxModuleIds.DisableTopBar
+                },
                 TitleZh = "顶栏应用图标右键弹出原生托盘菜单",
                 TitleEn = "Forward right-click on top bar app icons to native tray menu",
                 DescriptionZh = "转发顶栏应用图标的右键点击至原程序托盘菜单（按住 Shift + 右键仍可从顶栏移除）",
@@ -165,10 +298,57 @@ namespace TopBarAdaptiveColor
                 Id = ToolboxModuleIds.TopBarMaximizedWindowDrag,
                 Category = ToolboxCategory.StatusBarEnhancements,
                 ControlKind = ToolboxControlKind.Toggle,
+                DisabledWhenModuleIds = new[]
+                {
+                    ToolboxModuleIds.DisableTopBar
+                },
                 TitleZh = "顶栏空白处拖拽还原与双击控制",
                 TitleEn = "Drag or double-click blank top bar to restore & move maximized window",
                 DescriptionZh = "在顶栏空白处按住左键拖动超过 6px 即可还原并移动当前最大化窗口，双击空白处可切换最大化状态",
                 DescriptionEn = "Hold left-click in the blank top bar strip and drag >6px in any direction to restore and move the maximized window, or double-click to toggle maximize",
+                DefaultEnabled = true
+            },
+
+            // === 三、底部 Dock 栏 ===
+            new()
+            {
+                Id = ToolboxModuleIds.DisableDock,
+                Category = ToolboxCategory.DockEnhancements,
+                ControlKind = ToolboxControlKind.Toggle,
+                TitleZh = "关闭底部 Dock 栏（还原 Windows 原生任务栏）",
+                TitleEn = "Disable bottom Dock (restore native Windows taskbar)",
+                DescriptionZh = "关闭荣耀底部 Dock 栏、释放底部工作区并立即恢复 Windows 原生任务栏；关闭开关可随时恢复荣耀底栏",
+                DescriptionEn = "Close the HONOR bottom Dock, release reserved bottom workspace, and restore the native Windows taskbar (turn off anytime to restore HONOR Dock)",
+                DefaultEnabled = false
+            },
+            new()
+            {
+                Id = ToolboxModuleIds.DockStartNativeMenu,
+                Category = ToolboxCategory.DockEnhancements,
+                ControlKind = ToolboxControlKind.Toggle,
+                DisabledWhenModuleIds = new[]
+                {
+                    ToolboxModuleIds.DisableDock
+                },
+                TitleZh = "底栏开始按钮右键弹出原生 Windows 菜单",
+                TitleEn = "Right-click Dock Start button for native Windows menu (Win+X)",
+                DescriptionZh = "右键点击底部 Dock 栏的 Windows 开始按钮时，弹出原生 Windows 快捷菜单（Win + X，含任务管理器、终端、设备管理器、电源选项等）",
+                DescriptionEn = "Right-click the Windows Start button on the bottom Dock to open the native Windows Quick Link menu (Win + X)",
+                DefaultEnabled = true
+            },
+            new()
+            {
+                Id = ToolboxModuleIds.DockHighRefreshRate,
+                Category = ToolboxCategory.DockEnhancements,
+                ControlKind = ToolboxControlKind.Toggle,
+                DisabledWhenModuleIds = new[]
+                {
+                    ToolboxModuleIds.DisableDock
+                },
+                TitleZh = "底栏原生高刷解锁（同步显示器 VSync）",
+                TitleEn = "Unlock native high-refresh-rate Dock animations (DWM VSync)",
+                DescriptionZh = "突破 WPF 60Hz 上限与鼠标 15ms 输入节流，动效期间按显示器硬件垂直同步（DwmFlush）直驱 DirectComposition，解锁 120Hz/165Hz 满帧波浪缩放与滑入滑出（闲置时 0% 占用）",
+                DescriptionEn = "Bypass WPF's 60Hz cap and 15ms hover throttle by pacing DirectComposition motion frames to hardware DwmFlush VSync (120Hz/165Hz+ smoothness, 0% idle CPU)",
                 DefaultEnabled = true
             },
             new()
@@ -176,6 +356,10 @@ namespace TopBarAdaptiveColor
                 Id = ToolboxModuleIds.DockPreviewKeepOpenOnClose,
                 Category = ToolboxCategory.DockEnhancements,
                 ControlKind = ToolboxControlKind.Toggle,
+                DisabledWhenModuleIds = new[]
+                {
+                    ToolboxModuleIds.DisableDock
+                },
                 TitleZh = "关闭单个窗口后保持多窗口缩略图展开",
                 TitleEn = "Keep thumbnail strip open after middle-closing one window",
                 DescriptionZh = "中键或点击关闭缩略图中的单个窗口时，仅移除该窗口卡片并刷新排版，不收起整组预览",
@@ -187,6 +371,10 @@ namespace TopBarAdaptiveColor
                 Id = ToolboxModuleIds.DockPreviewAeroPeek,
                 Category = ToolboxCategory.DockEnhancements,
                 ControlKind = ToolboxControlKind.Toggle,
+                DisabledWhenModuleIds = new[]
+                {
+                    ToolboxModuleIds.DisableDock
+                },
                 TitleZh = "悬停缩略图卡片实时桌面预览 (Aero Peek)",
                 TitleEn = "Live desktop Aero Peek when hovering thumbnail cards",
                 DescriptionZh = "鼠标悬停在 Dock 缩略图卡片上时在桌面临时显示对应窗口完整画面，移开后恢复原状态",
@@ -198,34 +386,18 @@ namespace TopBarAdaptiveColor
                 Id = ToolboxModuleIds.DockPreviewTransferCorridor,
                 Category = ToolboxCategory.DockEnhancements,
                 ControlKind = ToolboxControlKind.Toggle,
+                DisabledWhenModuleIds = new[]
+                {
+                    ToolboxModuleIds.DisableDock
+                },
                 TitleZh = "Dock 缩略图斜向移动防误关",
                 TitleEn = "Protect Dock multi-window preview when moving diagonally across divider or icons",
                 DescriptionZh = "鼠标从底部 Dock 图标斜向移至预览缩略图期间，经过分隔线或擦过相邻图标时不中断当前预览",
                 DescriptionEn = "Prevent accidental preview dismissal or premature switching when crossing the separator or brushing adjacent Dock icons toward preview cards",
                 DefaultEnabled = true
             },
-            new()
-            {
-                Id = ToolboxModuleIds.TopBarPopupEdgeClamp,
-                Category = ToolboxCategory.BugFixes,
-                ControlKind = ToolboxControlKind.Toggle,
-                TitleZh = "修正右侧弹出面板超出屏幕边缘",
-                TitleEn = "Clamp top bar popups inside monitor bounds",
-                DescriptionZh = "隐藏部分右侧图标后，将控制中心、电池、音量等弹窗及其模糊层限制在当前显示器工作区内",
-                DescriptionEn = "Prevent battery/volume/network popups and acrylic backdrops from clipping past the screen edge",
-                DefaultEnabled = true
-            },
-            new()
-            {
-                Id = ToolboxModuleIds.AdaptiveTopBarGapFix,
-                Category = ToolboxCategory.BugFixes,
-                ControlKind = ToolboxControlKind.Toggle,
-                TitleZh = "修正窗口最大化后顶栏下方缝隙",
-                TitleEn = "Fix top bar bottom seam after maximizing",
-                DescriptionZh = "工作区重算导致最大化窗口轻微下移时，向下扩展状态栏背景高度以消除桌面透缝",
-                DescriptionEn = "Extend top bar bottom edge when workspace reservation shifts windows down",
-                DefaultEnabled = true
-            },
+
+            // === 四、通用性能与系统 ===
             new()
             {
                 Id = ToolboxModuleIds.FastSettingsResponse,
@@ -441,6 +613,8 @@ if (Test-Path $tpReg) {
 }
 $exePath = Join-Path $appDir 'magictaskbar-ui.exe'
 if (Test-Path $exePath) { Start-Process 'explorer.exe' -ArgumentList ('""' + $exePath + '""') }
+$dhExe = 'C:\Program Files\HONOR\MagicAnimation\NewExplorer\DesktopHost.exe'
+if ((Get-Process -Name 'MagicVisuals' -ErrorAction SilentlyContinue) -and -not (Get-Process -Name 'DesktopHost' -ErrorAction SilentlyContinue) -and (Test-Path $dhExe)) { Start-Process 'explorer.exe' -ArgumentList ('""' + $dhExe + '""') }
 if (Test-Path $ccExe) { Start-Sleep -Seconds 1; Start-Process 'explorer.exe' -ArgumentList ('""' + $ccExe + '""') }
 if ($SelfDelete -and (Test-Path $PSCommandPath)) { Remove-Item $PSCommandPath -Force }
 ";

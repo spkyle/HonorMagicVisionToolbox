@@ -4532,7 +4532,8 @@ namespace TopBarAdaptiveColor
                             await Task.Delay(delayMs).ConfigureAwait(false);
                             if (Volatile.Read(ref _scanGeneration) != gen ||
                                 _activeOverflowHwnd != ov ||
-                                !IsWindowVisible(ov))
+                                !IsWindowVisible(ov) ||
+                                IsWindowCloaked(ov))
                             {
                                 break;
                             }
@@ -4559,18 +4560,30 @@ namespace TopBarAdaptiveColor
         private static IntPtr FindVisibleOverflowWindow()
         {
             IntPtr win11 = FindWindow("TopLevelWindowForOverflowXamlIsland", null);
-            if (win11 != IntPtr.Zero && IsWindowVisible(win11))
+            if (win11 != IntPtr.Zero && IsWindowVisible(win11) && !IsWindowCloaked(win11))
             {
                 return win11;
             }
 
             IntPtr win10 = FindWindow("NotifyIconOverflowWindow", null);
-            if (win10 != IntPtr.Zero && IsWindowVisible(win10))
+            if (win10 != IntPtr.Zero && IsWindowVisible(win10) && !IsWindowCloaked(win10))
             {
                 return win10;
             }
 
             return IntPtr.Zero;
+        }
+
+        private static bool IsWindowCloaked(IntPtr hwnd)
+        {
+            try
+            {
+                return DwmGetWindowAttribute(hwnd, DwmwaCloaked, out int cloaked, Marshal.SizeOf<int>()) == 0 && cloaked != 0;
+            }
+            catch
+            {
+                return false;
+            }
         }
 
         private static List<IntPtr> CollectOverflowWindowHandles(IntPtr overflowHwnd)
@@ -4763,7 +4776,7 @@ namespace TopBarAdaptiveColor
             if (msg == WmLButtonDown)
             {
                 IntPtr ov = _activeOverflowHwnd;
-                if (ov == IntPtr.Zero || !IsWindowVisible(ov))
+                if (ov == IntPtr.Zero || !IsWindowVisible(ov) || IsWindowCloaked(ov))
                 {
                     ov = FindVisibleOverflowWindow();
                     if (ov != IntPtr.Zero)
@@ -4772,7 +4785,7 @@ namespace TopBarAdaptiveColor
                     }
                 }
 
-                if (ov != IntPtr.Zero && IsWindowVisible(ov) &&
+                if (ov != IntPtr.Zero && IsWindowVisible(ov) && !IsWindowCloaked(ov) &&
                     HiddenTrayPinEnhancer.GetWindowRect(ov, out HiddenTrayPinEnhancer.RECT r) &&
                     PointInRect(new HiddenTrayPinEnhancer.RECT { Left = r.Left - 4, Top = r.Top - 4, Right = r.Right + 4, Bottom = r.Bottom + 4 }, info.pt))
                 {
@@ -5282,6 +5295,7 @@ namespace TopBarAdaptiveColor
         private const uint EventObjectHide = 0x8003;
         private const uint WinEventOutOfContext = 0x0000;
         private const uint WinEventSkipOwnProcess = 0x0002;
+        private const int DwmwaCloaked = 14;
 
         private delegate IntPtr HookProc(int nCode, IntPtr wParam, IntPtr lParam);
         private delegate void WinEventDelegate(IntPtr hWinEventHook, uint eventType, IntPtr hwnd, int idObject, int idChild, uint idEventThread, uint dwmsEventTime);
@@ -5325,5 +5339,8 @@ namespace TopBarAdaptiveColor
 
         [DllImport("user32.dll")]
         private static extern bool EnumChildWindows(IntPtr hWndParent, HiddenTrayPinEnhancer.EnumWindowsProc lpEnumFunc, IntPtr lParam);
+
+        [DllImport("dwmapi.dll")]
+        private static extern int DwmGetWindowAttribute(IntPtr hwnd, int dwAttribute, out int pvAttribute, int cbAttribute);
     }
 }

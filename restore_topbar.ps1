@@ -430,6 +430,14 @@ if (-not $restarted) {
     Start-Process "explorer.exe" -ArgumentList ('"' + $exePath + '"')
 }
 
+$magicVisualsRunning = Get-Process -Name "MagicVisuals" -ErrorAction SilentlyContinue
+$desktopHostRunning = Get-Process -Name "DesktopHost" -ErrorAction SilentlyContinue
+$desktopHostExe = "C:\Program Files\HONOR\MagicAnimation\NewExplorer\DesktopHost.exe"
+if ($magicVisualsRunning -and -not $desktopHostRunning -and (Test-Path $desktopHostExe)) {
+    Start-Process "explorer.exe" -ArgumentList ('"' + $desktopHostExe + '"')
+    Write-Host "已恢复荣耀桌面接管进程 (DesktopHost.exe)" -ForegroundColor Green
+}
+
 if (Test-Path $ccExe) {
     Start-Sleep -Seconds 1
     $ccRestarted = Get-Process -Name "ControlCenterTrayUI" -ErrorAction SilentlyContinue

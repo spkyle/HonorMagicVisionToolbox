@@ -15,8 +15,13 @@ namespace TopBarAdaptiveColor
             "adaptive-topbar.json");
 
         private static readonly Dictionary<string, bool> ModuleStates = new(StringComparer.Ordinal);
+        private static bool _masterEnabled = true;
         private static bool _loaded;
 
+        public static event Action<bool>? MasterEnabledChanged;
+        public static event Action<bool>? NativeWindowsDesktopChanged;
+        public static event Action<bool>? DisableTopBarChanged;
+        public static event Action<bool>? DisableDockChanged;
         public static event Action<bool>? EnabledChanged;
         public static event Action<bool>? GapFixChanged;
         public static event Action<bool>? YoyoClawChanged;
@@ -28,12 +33,33 @@ namespace TopBarAdaptiveColor
         public static event Action<bool>? NativeTrayRightClickChanged;
         public static event Action<bool>? HiddenTrayIconPinningChanged;
         public static event Action<bool>? TopBarMaximizedWindowDragChanged;
+        public static event Action<bool>? DockStartNativeMenuChanged;
+        public static event Action<bool>? DockHighRefreshRateChanged;
         public static event Action<bool>? DockPreviewKeepOpenChanged;
         public static event Action<bool>? DockPreviewAeroPeekChanged;
         public static event Action<bool>? DockPreviewTransferCorridorChanged;
         public static event Action<bool>? TopBarPopupEdgeClampChanged;
+        public static event Action<bool>? FastDesktopRightClickChanged;
         public static event Action<bool>? TouchpadThreeFingerSearchChanged;
         public static event Action<string, bool>? ModuleChanged;
+
+        public static bool IsMasterEnabled
+        {
+            get
+            {
+                lock (Sync)
+                {
+                    EnsureLoadedLocked();
+                    return _masterEnabled;
+                }
+            }
+        }
+
+        public static bool IsNativeWindowsDesktopEnabled => IsModuleEnabled(ToolboxModuleIds.NativeWindowsDesktop, false);
+
+        public static bool IsTopBarDisabled => IsModuleEnabled(ToolboxModuleIds.DisableTopBar, false);
+
+        public static bool IsDockDisabled => IsModuleEnabled(ToolboxModuleIds.DisableDock, false);
 
         public static bool IsEnabled => IsModuleEnabled(ToolboxModuleIds.AdaptiveTopBarColor, true);
 
@@ -57,6 +83,10 @@ namespace TopBarAdaptiveColor
 
         public static bool IsTopBarMaximizedWindowDragEnabled => IsModuleEnabled(ToolboxModuleIds.TopBarMaximizedWindowDrag, true);
 
+        public static bool IsDockStartNativeMenuEnabled => IsModuleEnabled(ToolboxModuleIds.DockStartNativeMenu, true);
+
+        public static bool IsDockHighRefreshRateEnabled => IsModuleEnabled(ToolboxModuleIds.DockHighRefreshRate, true);
+
         public static bool IsDockPreviewKeepOpenOnCloseEnabled => IsModuleEnabled(ToolboxModuleIds.DockPreviewKeepOpenOnClose, true);
 
         public static bool IsDockPreviewAeroPeekEnabled => IsModuleEnabled(ToolboxModuleIds.DockPreviewAeroPeek, true);
@@ -64,6 +94,8 @@ namespace TopBarAdaptiveColor
         public static bool IsDockPreviewTransferCorridorEnabled => IsModuleEnabled(ToolboxModuleIds.DockPreviewTransferCorridor, true);
 
         public static bool IsTopBarPopupEdgeClampEnabled => IsModuleEnabled(ToolboxModuleIds.TopBarPopupEdgeClamp, true);
+
+        public static bool IsFastDesktopRightClickEnabled => IsModuleEnabled(ToolboxModuleIds.FastDesktopRightClick, true);
 
         public static bool IsTouchpadThreeFingerSearchEnabled => IsModuleEnabled(ToolboxModuleIds.TouchpadThreeFingerSearch, true);
 
@@ -77,7 +109,76 @@ namespace TopBarAdaptiveColor
             lock (Sync)
             {
                 EnsureLoadedLocked();
+                bool configured = ModuleStates.TryGetValue(moduleId, out bool enabled) ? enabled : defaultValue;
+                return GetEffectiveModuleValueLocked(moduleId, configured);
+            }
+        }
+
+        public static bool IsModuleConfiguredEnabled(string moduleId, bool defaultValue = true)
+        {
+            if (string.IsNullOrEmpty(moduleId))
+            {
+                return defaultValue;
+            }
+
+            lock (Sync)
+            {
+                EnsureLoadedLocked();
                 return ModuleStates.TryGetValue(moduleId, out bool enabled) ? enabled : defaultValue;
+            }
+        }
+
+        public static void SetMasterEnabled(bool enabled)
+        {
+            var effectiveChanges = new List<(string Id, bool EffectiveEnabled)>();
+            bool masterChanged;
+
+            lock (Sync)
+            {
+                EnsureLoadedLocked();
+                masterChanged = _masterEnabled != enabled;
+                if (!masterChanged)
+                {
+                    return;
+                }
+
+                var before = new Dictionary<string, bool>(StringComparer.Ordinal);
+                foreach (var mod in ToolboxModuleRegistry.Modules)
+                {
+                    if (mod.ControlKind != ToolboxControlKind.Toggle)
+                    {
+                        continue;
+                    }
+
+                    bool configured = ModuleStates.TryGetValue(mod.Id, out bool existing) ? existing : mod.DefaultEnabled;
+                    before[mod.Id] = GetEffectiveModuleValueLocked(mod.Id, configured);
+                }
+
+                _masterEnabled = enabled;
+
+                foreach (var mod in ToolboxModuleRegistry.Modules)
+                {
+                    if (mod.ControlKind != ToolboxControlKind.Toggle)
+                    {
+                        continue;
+                    }
+
+                    bool configured = ModuleStates.TryGetValue(mod.Id, out bool existing) ? existing : mod.DefaultEnabled;
+                    bool after = GetEffectiveModuleValueLocked(mod.Id, configured);
+                    if (before.TryGetValue(mod.Id, out bool prev) && prev != after)
+                    {
+                        effectiveChanges.Add((mod.Id, after));
+                    }
+                }
+
+                SaveLocked();
+            }
+
+            DiagnosticLog.Info($"Toolbox master switch updated: masterEnabled={enabled}, affectedModules={effectiveChanges.Count}");
+            MasterEnabledChanged?.Invoke(enabled);
+            foreach (var (id, eff) in effectiveChanges)
+            {
+                NotifyModuleChanged(id, eff);
             }
         }
 
@@ -93,31 +194,36 @@ namespace TopBarAdaptiveColor
                 return;
             }
 
-            bool changed;
+            bool effectiveChanged;
+            bool newEffective;
             lock (Sync)
             {
                 EnsureLoadedLocked();
-                bool previous = ModuleStates.TryGetValue(moduleId, out bool existing)
+                bool previousConfigured = ModuleStates.TryGetValue(moduleId, out bool existing)
                     ? existing
                     : GetDefaultEnabled(moduleId);
-                changed = previous != enabled;
+                bool previousEffective = GetEffectiveModuleValueLocked(moduleId, previousConfigured);
                 ModuleStates[moduleId] = enabled;
+                newEffective = GetEffectiveModuleValueLocked(moduleId, enabled);
+                effectiveChanged = previousEffective != newEffective;
                 SaveLocked();
             }
 
-            DiagnosticLog.Info($"Toolbox setting updated: module={moduleId} enabled={enabled}");
-            if (changed)
+            DiagnosticLog.Info($"Toolbox setting updated: module={moduleId} configured={enabled} effective={newEffective}");
+            if (effectiveChanged)
             {
-                NotifyModuleChanged(moduleId, enabled);
+                NotifyModuleChanged(moduleId, newEffective);
             }
         }
 
         public static void ResetAllToDefaults()
         {
             var notifications = new List<(string Id, bool Enabled)>();
+            bool masterChanged;
             lock (Sync)
             {
                 EnsureLoadedLocked();
+                var before = new Dictionary<string, bool>(StringComparer.Ordinal);
                 foreach (var mod in ToolboxModuleRegistry.Modules)
                 {
                     if (mod.ControlKind != ToolboxControlKind.Toggle)
@@ -125,23 +231,58 @@ namespace TopBarAdaptiveColor
                         continue;
                     }
 
-                    bool previous = ModuleStates.TryGetValue(mod.Id, out bool existing)
+                    bool prevConfigured = ModuleStates.TryGetValue(mod.Id, out bool existing)
                         ? existing
                         : mod.DefaultEnabled;
-                    ModuleStates[mod.Id] = mod.DefaultEnabled;
-                    if (previous != mod.DefaultEnabled)
+                    before[mod.Id] = GetEffectiveModuleValueLocked(mod.Id, prevConfigured);
+                }
+
+                masterChanged = !_masterEnabled;
+                _masterEnabled = true;
+
+                foreach (var mod in ToolboxModuleRegistry.Modules)
+                {
+                    if (mod.ControlKind != ToolboxControlKind.Toggle)
                     {
-                        notifications.Add((mod.Id, mod.DefaultEnabled));
+                        continue;
+                    }
+
+                    ModuleStates[mod.Id] = mod.DefaultEnabled;
+                    bool after = GetEffectiveModuleValueLocked(mod.Id, mod.DefaultEnabled);
+                    if (before.TryGetValue(mod.Id, out bool prev) && prev != after)
+                    {
+                        notifications.Add((mod.Id, after));
                     }
                 }
                 SaveLocked();
             }
 
-            DiagnosticLog.Info($"Reset toolbox settings to defaults (changedCount={notifications.Count}).");
+            DiagnosticLog.Info($"Reset toolbox settings to defaults (masterChanged={masterChanged}, changedCount={notifications.Count}).");
+            if (masterChanged)
+            {
+                MasterEnabledChanged?.Invoke(true);
+            }
             foreach (var (id, enabled) in notifications)
             {
                 NotifyModuleChanged(id, enabled);
             }
+        }
+
+        private static bool GetEffectiveModuleValueLocked(string moduleId, bool configuredValue)
+        {
+            if (_masterEnabled)
+            {
+                return configuredValue;
+            }
+
+            // Modules where true represents Honor's unmodified official behavior revert to true when toolbox is paused.
+            if (string.Equals(moduleId, ToolboxModuleIds.ShowYoyoClawButton, StringComparison.Ordinal) ||
+                string.Equals(moduleId, ToolboxModuleIds.TouchpadThreeFingerSearch, StringComparison.Ordinal))
+            {
+                return true;
+            }
+
+            return false;
         }
 
         private static bool GetDefaultEnabled(string moduleId)
@@ -160,7 +301,19 @@ namespace TopBarAdaptiveColor
         {
             ModuleChanged?.Invoke(moduleId, enabled);
 
-            if (string.Equals(moduleId, ToolboxModuleIds.AdaptiveTopBarColor, StringComparison.Ordinal))
+            if (string.Equals(moduleId, ToolboxModuleIds.NativeWindowsDesktop, StringComparison.Ordinal))
+            {
+                NativeWindowsDesktopChanged?.Invoke(enabled);
+            }
+            else if (string.Equals(moduleId, ToolboxModuleIds.DisableTopBar, StringComparison.Ordinal))
+            {
+                DisableTopBarChanged?.Invoke(enabled);
+            }
+            else if (string.Equals(moduleId, ToolboxModuleIds.DisableDock, StringComparison.Ordinal))
+            {
+                DisableDockChanged?.Invoke(enabled);
+            }
+            else if (string.Equals(moduleId, ToolboxModuleIds.AdaptiveTopBarColor, StringComparison.Ordinal))
             {
                 EnabledChanged?.Invoke(enabled);
             }
@@ -204,6 +357,14 @@ namespace TopBarAdaptiveColor
             {
                 TopBarMaximizedWindowDragChanged?.Invoke(enabled);
             }
+            else if (string.Equals(moduleId, ToolboxModuleIds.DockStartNativeMenu, StringComparison.Ordinal))
+            {
+                DockStartNativeMenuChanged?.Invoke(enabled);
+            }
+            else if (string.Equals(moduleId, ToolboxModuleIds.DockHighRefreshRate, StringComparison.Ordinal))
+            {
+                DockHighRefreshRateChanged?.Invoke(enabled);
+            }
             else if (string.Equals(moduleId, ToolboxModuleIds.DockPreviewKeepOpenOnClose, StringComparison.Ordinal))
             {
                 DockPreviewKeepOpenChanged?.Invoke(enabled);
@@ -219,6 +380,10 @@ namespace TopBarAdaptiveColor
             else if (string.Equals(moduleId, ToolboxModuleIds.TopBarPopupEdgeClamp, StringComparison.Ordinal))
             {
                 TopBarPopupEdgeClampChanged?.Invoke(enabled);
+            }
+            else if (string.Equals(moduleId, ToolboxModuleIds.FastDesktopRightClick, StringComparison.Ordinal))
+            {
+                FastDesktopRightClickChanged?.Invoke(enabled);
             }
             else if (string.Equals(moduleId, ToolboxModuleIds.TouchpadThreeFingerSearch, StringComparison.Ordinal))
             {
@@ -256,6 +421,12 @@ namespace TopBarAdaptiveColor
                     return;
                 }
 
+                if (doc.RootElement.TryGetProperty("masterEnabled", out var masterProp) &&
+                    (masterProp.ValueKind == JsonValueKind.True || masterProp.ValueKind == JsonValueKind.False))
+                {
+                    _masterEnabled = masterProp.GetBoolean();
+                }
+
                 if (doc.RootElement.TryGetProperty("enabled", out var legacyProp) &&
                     (legacyProp.ValueKind == JsonValueKind.True || legacyProp.ValueKind == JsonValueKind.False))
                 {
@@ -270,6 +441,20 @@ namespace TopBarAdaptiveColor
                         if (entry.Value.ValueKind == JsonValueKind.True || entry.Value.ValueKind == JsonValueKind.False)
                         {
                             ModuleStates[entry.Name] = entry.Value.GetBoolean();
+                        }
+                    }
+                }
+
+                if (!_masterEnabled &&
+                    doc.RootElement.TryGetProperty("savedStates", out var savedProp) &&
+                    savedProp.ValueKind == JsonValueKind.Object)
+                {
+                    foreach (var entry in savedProp.EnumerateObject())
+                    {
+                        if (entry.Name.StartsWith("saved:", StringComparison.Ordinal) &&
+                            (entry.Value.ValueKind == JsonValueKind.True || entry.Value.ValueKind == JsonValueKind.False))
+                        {
+                            ModuleStates[entry.Name.Substring("saved:".Length)] = entry.Value.GetBoolean();
                         }
                     }
                 }
@@ -290,15 +475,34 @@ namespace TopBarAdaptiveColor
                     Directory.CreateDirectory(dir);
                 }
 
-                bool legacyEnabled = ModuleStates.TryGetValue(ToolboxModuleIds.AdaptiveTopBarColor, out bool en)
+                var effectiveModules = new SortedDictionary<string, bool>(StringComparer.Ordinal);
+                foreach (var kv in ModuleStates)
+                {
+                    effectiveModules[kv.Key] = GetEffectiveModuleValueLocked(kv.Key, kv.Value);
+                }
+
+                bool legacyEnabled = effectiveModules.TryGetValue(ToolboxModuleIds.AdaptiveTopBarColor, out bool en)
                     ? en
-                    : true;
+                    : _masterEnabled;
 
                 var payload = new Dictionary<string, object>(StringComparer.Ordinal)
                 {
+                    ["masterEnabled"] = _masterEnabled,
                     ["enabled"] = legacyEnabled,
-                    ["modules"] = new SortedDictionary<string, bool>(ModuleStates, StringComparer.Ordinal)
+                    ["modules"] = effectiveModules
                 };
+
+                if (!_masterEnabled)
+                {
+                    // Prefix keys with "saved:" so external regex readers (ControlCenterSpeedBoost / MessageCenterBridge)
+                    // strictly match only the effective flags in "modules".
+                    var savedStates = new SortedDictionary<string, bool>(StringComparer.Ordinal);
+                    foreach (var kv in ModuleStates)
+                    {
+                        savedStates["saved:" + kv.Key] = kv.Value;
+                    }
+                    payload["savedStates"] = savedStates;
+                }
 
                 string json = JsonSerializer.Serialize(payload, new JsonSerializerOptions
                 {

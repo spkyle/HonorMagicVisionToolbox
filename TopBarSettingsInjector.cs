@@ -51,14 +51,38 @@ namespace TopBarAdaptiveColor
             }
         }
 
+        public static void TrySelectToolboxTab(Window settingsWindow)
+        {
+            if (settingsWindow == null)
+            {
+                return;
+            }
+
+            try
+            {
+                if (Hosts.TryGetValue(settingsWindow, out var host))
+                {
+                    host.SelectToolboxTabFromExternal();
+                }
+            }
+            catch (Exception ex)
+            {
+                DiagnosticLog.Warn($"TopBarSettingsInjector.TrySelectToolboxTab failed: {ex.Message}");
+            }
+        }
+
         private sealed class SettingsToolboxHost
         {
             private readonly Window _window;
             private readonly Button _toolboxButton;
             private readonly TextBlock _toolboxButtonText;
             private readonly ScrollViewer _toolboxPanel;
+            private readonly CheckBox _masterToggle;
+            private readonly TextBlock _masterStateLabel;
+            private readonly bool _isChinese;
+            private readonly List<FrameworkElement> _masterControlledContainers = new();
             private readonly Dictionary<string, CheckBox> _toggleControls = new(StringComparer.Ordinal);
-            private readonly List<(IReadOnlyList<string> Parents, FrameworkElement Row, CheckBox? Toggle)> _dependentRows = new();
+            private readonly List<(IReadOnlyList<string>? Parents, IReadOnlyList<string>? DisabledWhen, FrameworkElement Row, CheckBox? Toggle)> _dependentRows = new();
             private readonly List<FrameworkElement> _nativePanels = new();
             private readonly MethodInfo? _showTabMethod;
             private readonly FieldInfo? _selectedTabBgField;
@@ -72,6 +96,9 @@ namespace TopBarAdaptiveColor
                 Button toolboxButton,
                 TextBlock toolboxButtonText,
                 ScrollViewer toolboxPanel,
+                CheckBox masterToggle,
+                TextBlock masterStateLabel,
+                bool isChinese,
                 MethodInfo? showTabMethod,
                 FieldInfo? selectedTabBgField,
                 FieldInfo? currentTabField)
@@ -80,6 +107,9 @@ namespace TopBarAdaptiveColor
                 _toolboxButton = toolboxButton;
                 _toolboxButtonText = toolboxButtonText;
                 _toolboxPanel = toolboxPanel;
+                _masterToggle = masterToggle;
+                _masterStateLabel = masterStateLabel;
+                _isChinese = isChinese;
                 _showTabMethod = showTabMethod;
                 _selectedTabBgField = selectedTabBgField;
                 _currentTabField = currentTabField;
@@ -127,7 +157,8 @@ namespace TopBarAdaptiveColor
                     return null;
                 }
 
-                var (toolboxPanel, toggleControls, dependentRows) = BuildToolboxScrollPanel(settingsWindow, anchorPanel, notificationCanvas, acrylicCheckBox, isChinese);
+                var (toolboxPanel, masterToggle, masterStateLabel, masterContainers, toggleControls, dependentRows) =
+                    BuildToolboxScrollPanel(settingsWindow, anchorPanel, notificationCanvas, acrylicCheckBox, isChinese);
                 if (!InsertContentPanel(anchorPanel, toolboxPanel))
                 {
                     DiagnosticLog.Warn("TopBarSettingsInjector: Unable to attach MagicToolbox content panel.");
@@ -139,19 +170,24 @@ namespace TopBarAdaptiveColor
                     tabButton,
                     tabText,
                     toolboxPanel,
+                    masterToggle,
+                    masterStateLabel,
+                    isChinese,
                     showTabMethod,
                     selectedTabBgField,
                     currentTabField);
 
+                host._masterControlledContainers.AddRange(masterContainers);
                 foreach (var kv in toggleControls)
                 {
                     host._toggleControls[kv.Key] = kv.Value;
                 }
                 host._dependentRows.AddRange(dependentRows);
+                host.SyncMasterVisualState();
                 host.SyncDependentRowStates();
 
                 host.HookNavigationAndLifecycle(settingsWindow, t, flags);
-                DiagnosticLog.Info($"Injected modular MagicToolbox tab & page ({host._toggleControls.Count} toggles).");
+                DiagnosticLog.Info($"Injected modular MagicToolbox tab & page {ToolboxModuleRegistry.ToolboxVersion} ({host._toggleControls.Count} toggles).");
                 return host;
             }
 
@@ -162,12 +198,19 @@ namespace TopBarAdaptiveColor
                     return;
                 }
 
+                bool masterEnabled = AdaptiveSettingsStore.IsMasterEnabled;
+                if (_masterToggle.IsChecked != masterEnabled)
+                {
+                    _masterToggle.IsChecked = masterEnabled;
+                }
+                SyncMasterVisualState();
+
                 foreach (var mod in ToolboxModuleRegistry.Modules)
                 {
                     if (mod.ControlKind == ToolboxControlKind.Toggle &&
                         _toggleControls.TryGetValue(mod.Id, out CheckBox? cb))
                     {
-                        bool val = AdaptiveSettingsStore.IsModuleEnabled(mod.Id, mod.DefaultEnabled);
+                        bool val = AdaptiveSettingsStore.IsModuleConfiguredEnabled(mod.Id, mod.DefaultEnabled);
                         if (cb.IsChecked != val)
                         {
                             cb.IsChecked = val;
@@ -178,29 +221,69 @@ namespace TopBarAdaptiveColor
                 SyncDependentRowStates();
             }
 
+            private void SyncMasterVisualState()
+            {
+                bool masterEnabled = AdaptiveSettingsStore.IsMasterEnabled;
+                _masterStateLabel.Text = _isChinese
+                    ? (masterEnabled ? "总开关 · 已开启" : "总开关 · 已关闭")
+                    : (masterEnabled ? "Master · On" : "Master · Off");
+
+                foreach (var container in _masterControlledContainers)
+                {
+                    container.IsEnabled = masterEnabled;
+                    container.Opacity = masterEnabled ? 1.0 : 0.45;
+                }
+            }
+
             private void SyncDependentRowStates()
             {
                 foreach (var dep in _dependentRows)
                 {
-                    bool anyParentEnabled = false;
-                    for (int i = 0; i < dep.Parents.Count; i++)
+                    bool rowEnabled = true;
+
+                    if (dep.Parents is { Count: > 0 })
                     {
-                        string pid = dep.Parents[i];
-                        bool parentVal = _toggleControls.TryGetValue(pid, out CheckBox? parentCb)
-                            ? parentCb.IsChecked == true
-                            : AdaptiveSettingsStore.IsModuleEnabled(pid, true);
-                        if (parentVal)
+                        bool anyParentEnabled = false;
+                        for (int i = 0; i < dep.Parents.Count; i++)
                         {
-                            anyParentEnabled = true;
-                            break;
+                            string pid = dep.Parents[i];
+                            bool parentVal = _toggleControls.TryGetValue(pid, out CheckBox? parentCb)
+                                ? parentCb.IsChecked == true
+                                : AdaptiveSettingsStore.IsModuleConfiguredEnabled(pid, true);
+                            if (parentVal)
+                            {
+                                anyParentEnabled = true;
+                                break;
+                            }
+                        }
+
+                        if (!anyParentEnabled)
+                        {
+                            rowEnabled = false;
                         }
                     }
 
-                    dep.Row.IsEnabled = anyParentEnabled;
-                    dep.Row.Opacity = anyParentEnabled ? 1.0 : 0.45;
+                    if (rowEnabled && dep.DisabledWhen is { Count: > 0 })
+                    {
+                        for (int i = 0; i < dep.DisabledWhen.Count; i++)
+                        {
+                            string cid = dep.DisabledWhen[i];
+                            bool conflictVal = _toggleControls.TryGetValue(cid, out CheckBox? conflictCb)
+                                ? conflictCb.IsChecked == true
+                                : AdaptiveSettingsStore.IsModuleConfiguredEnabled(cid, false);
+                            if (conflictVal)
+                            {
+                                rowEnabled = false;
+                                break;
+                            }
+                        }
+                    }
+
+                    dep.Row.IsEnabled = rowEnabled;
+                    dep.Row.Opacity = rowEnabled ? 1.0 : 0.45;
                     if (dep.Toggle != null)
                     {
-                        dep.Toggle.IsEnabled = anyParentEnabled;
+                        dep.Toggle.IsEnabled = rowEnabled;
                     }
                 }
             }
@@ -246,6 +329,7 @@ namespace TopBarAdaptiveColor
                     }
                 }
 
+                AdaptiveSettingsStore.MasterEnabledChanged += OnStoreMasterEnabledChanged;
                 AdaptiveSettingsStore.ModuleChanged += OnStoreModuleChanged;
                 SystemEvents.UserPreferenceChanged += OnSystemPreferenceChanged;
                 settingsWindow.IsVisibleChanged += OnWindowIsVisibleChanged;
@@ -300,6 +384,29 @@ namespace TopBarAdaptiveColor
                 }));
             }
 
+            private void OnStoreMasterEnabledChanged(bool enabled)
+            {
+                if (_disposed)
+                {
+                    return;
+                }
+
+                _window.Dispatcher.BeginInvoke(new Action(() =>
+                {
+                    if (_disposed)
+                    {
+                        return;
+                    }
+
+                    if (_masterToggle.IsChecked != enabled)
+                    {
+                        _masterToggle.IsChecked = enabled;
+                    }
+                    SyncMasterVisualState();
+                    SyncDependentRowStates();
+                }));
+            }
+
             private void OnStoreModuleChanged(string moduleId, bool enabled)
             {
                 if (_disposed)
@@ -314,9 +421,10 @@ namespace TopBarAdaptiveColor
                         return;
                     }
 
-                    if (_toggleControls.TryGetValue(moduleId, out CheckBox? cb) && cb.IsChecked != enabled)
+                    bool configured = AdaptiveSettingsStore.IsModuleConfiguredEnabled(moduleId, enabled);
+                    if (_toggleControls.TryGetValue(moduleId, out CheckBox? cb) && cb.IsChecked != configured)
                     {
-                        cb.IsChecked = enabled;
+                        cb.IsChecked = configured;
                     }
                     SyncDependentRowStates();
                 }));
@@ -330,6 +438,7 @@ namespace TopBarAdaptiveColor
                 }
 
                 _disposed = true;
+                AdaptiveSettingsStore.MasterEnabledChanged -= OnStoreMasterEnabledChanged;
                 AdaptiveSettingsStore.ModuleChanged -= OnStoreModuleChanged;
                 SystemEvents.UserPreferenceChanged -= OnSystemPreferenceChanged;
                 _window.IsVisibleChanged -= OnWindowIsVisibleChanged;
@@ -339,6 +448,11 @@ namespace TopBarAdaptiveColor
                 {
                     panel.IsVisibleChanged -= OnNativePanelIsVisibleChanged;
                 }
+            }
+
+            public void SelectToolboxTabFromExternal()
+            {
+                SelectToolboxTab();
             }
 
             private void SelectToolboxTab()
@@ -750,7 +864,13 @@ namespace TopBarAdaptiveColor
                 return false;
             }
 
-            private static (ScrollViewer Panel, Dictionary<string, CheckBox> Toggles, List<(IReadOnlyList<string> Parents, FrameworkElement Row, CheckBox? Toggle)> DependentRows) BuildToolboxScrollPanel(
+            private static (
+                ScrollViewer Panel,
+                CheckBox MasterToggle,
+                TextBlock MasterStateLabel,
+                List<FrameworkElement> MasterControlledContainers,
+                Dictionary<string, CheckBox> Toggles,
+                List<(IReadOnlyList<string>? Parents, IReadOnlyList<string>? DisabledWhen, FrameworkElement Row, CheckBox? Toggle)> DependentRows) BuildToolboxScrollPanel(
                 Window settingsWindow,
                 FrameworkElement anchorPanel,
                 Canvas? notificationCanvas,
@@ -758,7 +878,8 @@ namespace TopBarAdaptiveColor
                 bool isChinese)
             {
                 var toggles = new Dictionary<string, CheckBox>(StringComparer.Ordinal);
-                var dependentRows = new List<(IReadOnlyList<string> Parents, FrameworkElement Row, CheckBox? Toggle)>();
+                var dependentRows = new List<(IReadOnlyList<string>? Parents, IReadOnlyList<string>? DisabledWhen, FrameworkElement Row, CheckBox? Toggle)>();
+                var masterControlledContainers = new List<FrameworkElement>();
                 FontFamily baseFont = FindFontFamily(notificationCanvas) ?? new FontFamily("HONOR Sans Design");
 
                 var scroll = new ScrollViewer
@@ -798,17 +919,101 @@ namespace TopBarAdaptiveColor
                     Margin = new Thickness(contentLeftMargin, 15.0, contentRightMargin, 28.0)
                 };
 
-                // Page header matching Honor settings sections
+                // Page header matching Honor settings sections (title + version badge on left, master switch on right)
+                var headerGrid = new Grid
+                {
+                    Margin = new Thickness(16.0, 0.0, 16.0, 4.0)
+                };
+                headerGrid.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(1.0, GridUnitType.Star) });
+                headerGrid.ColumnDefinitions.Add(new ColumnDefinition { Width = GridLength.Auto });
+
+                var titleRow = new StackPanel
+                {
+                    Orientation = Orientation.Horizontal,
+                    VerticalAlignment = VerticalAlignment.Center
+                };
+
                 var pageTitle = new TextBlock
                 {
                     Text = isChinese ? "Magic 视界工具箱" : "Magic Toolbox",
                     FontFamily = baseFont,
                     FontSize = 16.0,
                     FontWeight = FontWeights.Medium,
-                    Margin = new Thickness(16.0, 0.0, 0.0, 4.0)
+                    VerticalAlignment = VerticalAlignment.Center
                 };
                 pageTitle.SetResourceReference(TextBlock.ForegroundProperty, "SettingsPrimaryTextBrush");
-                rootStack.Children.Add(pageTitle);
+                titleRow.Children.Add(pageTitle);
+
+                var versionBadgeText = new TextBlock
+                {
+                    Text = ToolboxModuleRegistry.ToolboxVersion,
+                    FontFamily = baseFont,
+                    FontSize = 11.5,
+                    FontWeight = FontWeights.Medium,
+                    VerticalAlignment = VerticalAlignment.Center
+                };
+                versionBadgeText.SetResourceReference(TextBlock.ForegroundProperty, "SettingsSecondaryTextBrush");
+
+                var versionBadge = new Border
+                {
+                    Child = versionBadgeText,
+                    CornerRadius = new CornerRadius(6),
+                    BorderThickness = new Thickness(1),
+                    Padding = new Thickness(7.0, 1.5, 7.0, 1.5),
+                    Margin = new Thickness(8.0, 1.0, 0.0, 0.0),
+                    VerticalAlignment = VerticalAlignment.Center,
+                    SnapsToDevicePixels = true
+                };
+                versionBadge.SetResourceReference(Border.BackgroundProperty, "SettingsCardBackgroundBrush");
+                versionBadge.SetResourceReference(Border.BorderBrushProperty, "SettingsCardBorderBrush");
+                titleRow.Children.Add(versionBadge);
+
+                Grid.SetColumn(titleRow, 0);
+                headerGrid.Children.Add(titleRow);
+
+                bool masterEnabled = AdaptiveSettingsStore.IsMasterEnabled;
+                var masterPanel = new StackPanel
+                {
+                    Orientation = Orientation.Horizontal,
+                    VerticalAlignment = VerticalAlignment.Center
+                };
+
+                var masterStateLabel = new TextBlock
+                {
+                    Text = isChinese
+                        ? (masterEnabled ? "总开关 · 已开启" : "总开关 · 已关闭")
+                        : (masterEnabled ? "Master · On" : "Master · Off"),
+                    FontFamily = baseFont,
+                    FontSize = 12.0,
+                    VerticalAlignment = VerticalAlignment.Center,
+                    Margin = new Thickness(0.0, 0.0, 8.0, 0.0)
+                };
+                masterStateLabel.SetResourceReference(TextBlock.ForegroundProperty, "SettingsSecondaryTextBrush");
+                masterPanel.Children.Add(masterStateLabel);
+
+                var masterToggle = new CheckBox
+                {
+                    Name = "ToolboxMasterSwitch",
+                    Width = templateCheckBox != null && templateCheckBox.Width > 0 ? templateCheckBox.Width : 44.0,
+                    Height = templateCheckBox != null && templateCheckBox.Height > 0 ? templateCheckBox.Height : 24.0,
+                    Style = templateCheckBox?.Style,
+                    Cursor = templateCheckBox?.Cursor ?? Cursors.Hand,
+                    VerticalAlignment = VerticalAlignment.Center,
+                    IsChecked = masterEnabled,
+                    ToolTip = isChinese
+                        ? "一键启用或暂时停用工具箱全部增强与修复功能（保留各项已选配置）"
+                        : "Enable or pause all toolbox enhancements and fixes at once (preserves per-module choices)"
+                };
+                AutomationProperties.SetName(masterToggle, isChinese ? "Magic 视界工具箱总开关" : "Magic Toolbox Master Switch");
+                masterToggle.Click += (_, _) =>
+                {
+                    AdaptiveSettingsStore.SetMasterEnabled(masterToggle.IsChecked == true);
+                };
+                masterPanel.Children.Add(masterToggle);
+
+                Grid.SetColumn(masterPanel, 1);
+                headerGrid.Children.Add(masterPanel);
+                rootStack.Children.Add(headerGrid);
 
                 var pageSubtitle = new TextBlock
                 {
@@ -871,7 +1076,8 @@ namespace TopBarAdaptiveColor
                     var cardStack = new StackPanel { Orientation = Orientation.Vertical };
                     for (int i = 0; i < items.Count; i++)
                     {
-                        bool isSubItem = items[i].ParentModuleIds is { Count: > 0 };
+                        bool isSubItem = items[i].ParentModuleIds is { Count: > 0 } ||
+                                         items[i].DisabledWhenModuleIds is { Count: > 0 };
                         if (i > 0)
                         {
                             var divider = new Border
@@ -892,10 +1098,15 @@ namespace TopBarAdaptiveColor
 
                     cardBorder.Child = cardStack;
                     rootStack.Children.Add(cardBorder);
+
+                    if (cat.Category != ToolboxCategory.Maintenance)
+                    {
+                        masterControlledContainers.Add(cardBorder);
+                    }
                 }
 
                 scroll.Content = rootStack;
-                return (scroll, toggles, dependentRows);
+                return (scroll, masterToggle, masterStateLabel, masterControlledContainers, toggles, dependentRows);
             }
 
             private static FrameworkElement BuildModuleRow(
@@ -905,9 +1116,10 @@ namespace TopBarAdaptiveColor
                 FontFamily baseFont,
                 bool isChinese,
                 Dictionary<string, CheckBox> toggles,
-                List<(IReadOnlyList<string> Parents, FrameworkElement Row, CheckBox? Toggle)> dependentRows)
+                List<(IReadOnlyList<string>? Parents, IReadOnlyList<string>? DisabledWhen, FrameworkElement Row, CheckBox? Toggle)> dependentRows)
             {
-                bool isSubOption = module.ParentModuleIds is { Count: > 0 };
+                bool isSubOption = module.ParentModuleIds is { Count: > 0 } ||
+                                   module.DisabledWhenModuleIds is { Count: > 0 };
                 var grid = new Grid
                 {
                     Margin = isSubOption
@@ -980,7 +1192,7 @@ namespace TopBarAdaptiveColor
                 CheckBox? createdToggle = null;
                 if (module.ControlKind == ToolboxControlKind.Toggle)
                 {
-                    bool enabled = AdaptiveSettingsStore.IsModuleEnabled(module.Id, module.DefaultEnabled);
+                    bool enabled = AdaptiveSettingsStore.IsModuleConfiguredEnabled(module.Id, module.DefaultEnabled);
                     var cb = new CheckBox
                     {
                         Name = "ToolboxCheck_" + module.Id,
@@ -1015,9 +1227,9 @@ namespace TopBarAdaptiveColor
                 Grid.SetColumn(actionControl, 1);
                 grid.Children.Add(actionControl);
 
-                if (module.ParentModuleIds is { Count: > 0 })
+                if (module.ParentModuleIds is { Count: > 0 } || module.DisabledWhenModuleIds is { Count: > 0 })
                 {
-                    dependentRows.Add((module.ParentModuleIds, grid, createdToggle));
+                    dependentRows.Add((module.ParentModuleIds, module.DisabledWhenModuleIds, grid, createdToggle));
                 }
 
                 return grid;
